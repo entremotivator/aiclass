@@ -286,11 +286,14 @@ def show_login():
             with col1:
                 remember_me = st.checkbox("Remember me")
             with col2:
-                forgot_password = st.button("Forgot Password?", type="secondary")
+                forgot_password = st.form_submit_button("Forgot Password?")
             
             login_button = st.form_submit_button("🚀 Login to NovaMind", use_container_width=True)
             
-            if login_button:
+            # Handle form submissions
+            if forgot_password:
+                st.info("🔄 Password reset functionality would be implemented here. For demo, use: demo@novamind.ai / demo123")
+            elif login_button:
                 if not email or not password:
                     st.error("Please enter both email and password")
                 elif not validate_email(email):
@@ -308,9 +311,6 @@ def show_login():
                         st.session_state.login_attempts += 1
                         st.session_state.last_attempt_time = datetime.now()
                         st.error(f"Invalid credentials. Attempts: {st.session_state.login_attempts}/5")
-        
-        if forgot_password:
-            st.info("🔄 Password reset functionality would be implemented here. For demo, use: demo@novamind.ai / demo123")
     
     with tab2:
         st.markdown("### Join NovaMind AI")
@@ -400,13 +400,29 @@ def show_dashboard():
     with tab2:
         st.markdown("### 🤖 AI Chat Interface")
         st.info("Your enhanced multi-LLM chatbot would be embedded here.")
+        
+        # Placeholder for chatbot integration
+        st.markdown("#### Integration Example:")
         st.code("""
 # This would integrate with your enhanced chatbot
 # The user is already authenticated and can access all features
 if st.session_state.authenticated:
     # Load the main chatbot interface
-    load_chatbot_interface()
+    load_multi_llm_chatbot(user_info=st.session_state.user_info)
         """)
+        
+        # Sample chat interface preview
+        st.markdown("#### Preview:")
+        with st.container():
+            st.text_input("💬 Chat with AI", placeholder="Ask me anything...")
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.selectbox("AI Provider", ["OpenAI", "DeepSeek", "Gemini", "Claude"])
+            with col2:
+                st.selectbox("Model", ["GPT-4", "GPT-3.5-turbo"])
+            with col3:
+                if st.button("Send"):
+                    st.success("Message would be sent to the AI!")
     
     with tab3:
         st.markdown("### ⚙️ Account Settings")
@@ -417,9 +433,19 @@ if st.session_state.authenticated:
             st.slider("Default Temperature", 0.0, 2.0, 0.7)
             st.checkbox("Email Notifications", value=True)
             st.checkbox("Dark Mode", value=False)
+            st.text_area("API Keys", placeholder="Manage your API keys here...", type="password")
             
             if st.form_submit_button("💾 Save Settings"):
                 st.success("Settings saved successfully!")
+        
+        st.markdown("### 🔒 Security")
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("🔑 Change Password"):
+                st.info("Password change form would appear here")
+        with col2:
+            if st.button("🔐 Two-Factor Auth"):
+                st.info("2FA setup would be available here")
 
 # Features showcase
 def show_features():
@@ -456,16 +482,23 @@ def show_demo_info():
     st.markdown("""
     <div class="features-container">
         <h4 style="color: #333;">🎮 Demo Credentials</h4>
-        <p><strong>Admin Account:</strong></p>
-        <ul>
-            <li>Email: admin@novamind.ai</li>
-            <li>Password: password</li>
-        </ul>
-        <p><strong>User Account:</strong></p>
-        <ul>
-            <li>Email: demo@novamind.ai</li>
-            <li>Password: demo123</li>
-        </ul>
+        <div style="background-color: #e8f5e8; padding: 1rem; border-radius: 8px; margin: 1rem 0;">
+            <p><strong>👑 Admin Account:</strong></p>
+            <ul>
+                <li><strong>Email:</strong> admin@novamind.ai</li>
+                <li><strong>Password:</strong> password</li>
+            </ul>
+        </div>
+        <div style="background-color: #e3f2fd; padding: 1rem; border-radius: 8px; margin: 1rem 0;">
+            <p><strong>👤 User Account:</strong></p>
+            <ul>
+                <li><strong>Email:</strong> demo@novamind.ai</li>
+                <li><strong>Password:</strong> demo123</li>
+            </ul>
+        </div>
+        <p style="color: #666; font-size: 0.9rem;">
+            💡 <em>Try both accounts to see different user roles and permissions!</em>
+        </p>
     </div>
     """, unsafe_allow_html=True)
 
