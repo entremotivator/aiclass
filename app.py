@@ -124,19 +124,25 @@ def signup(email, password, role="user"):
         return False, "⚠️ Password must be at least 12 characters and include uppercase, lowercase, number, and special character."
     
     try:
-        res = supabase.auth.sign_up({"email": email, "password": password})
+        res = supabase.auth.sign_up({
+            "email": email, 
+            "password": password,
+            "options": {"email_confirm": False}  # Disable auto-confirmation
+        })
         if res.user:
-            supabase.table("user_profiles").insert({
+            supabase.table("pending_signups").insert({
                 "id": res.user.id,
                 "email": email,
-                "role": role
+                "requested_role": role,
+                "status": "pending",
+                "created_at": datetime.now().isoformat()
             }).execute()
-            return True, "✅ Account created! Please check your email to verify your account, then log in."
+            return True, "✅ Account request submitted! An admin will review and approve your account shortly."
         return False, "❌ Failed to create account."
     except Exception as e:
         error_msg = str(e)
         if "already registered" in error_msg.lower():
-            return False, "⚠️ Email already registered. Try logging in."
+            return False, "⚠️ Email already registered. Try logging in or contact admin if your account is pending approval."
         return False, f"❌ Signup error: {error_msg}"
 
 # -------------------------
@@ -146,8 +152,22 @@ def login(email, password):
     try:
         res = supabase.auth.sign_in_with_password({"email": email, "password": password})
         if res.user:
-            profile = supabase.table("user_profiles").select("role").eq("id", res.user.id).execute()
-            role = profile.data[0]["role"] if profile.data else "user"
+            profile = supabase.table("user_profiles").select("role, status").eq("id", res.user.id).execute()
+            if not profile.data:
+                # Check if user is still pending approval
+                pending = supabase.table("pending_signups").select("status").eq("id", res.user.id).execute()
+                if pending.data and pending.data[0]["status"] == "pending":
+                    return False, "⚠️ Your account is pending admin approval. Please wait for approval."
+                elif pending.data and pending.data[0]["status"] == "rejected":
+                    return False, "❌ Your account request was rejected. Contact admin for more information."
+                else:
+                    return False, "❌ Account not found. Please contact admin."
+            
+            user_data = profile.data[0]
+            if user_data.get("status") != "approved":
+                return False, "⚠️ Your account is not approved yet. Please wait for admin approval."
+                
+            role = user_data["role"]
             st.session_state.authenticated = True
             st.session_state.user = res.user
             st.session_state.role = role
@@ -270,91 +290,176 @@ def show_admin_analytics():
 def show_user_management():
     st.subheader("👥 User Management")
     
-    try:
-        users = supabase.table("user_profiles").select("*").execute()
-        auth_users = supabase.auth.admin.list_users()
-
-        # Merge auth info + profiles
-        user_data = []
-        for profile in users.data or []:
-            auth_info = next((u for u in auth_users.user if u.id == profile["id"]), None)
-            user_data.append({
-                "id": profile["id"],
-                "email": profile["email"],
-                "role": profile["role"],
-                "created_at": getattr(auth_info, "created_at", None),
-                "last_sign_in": getattr(auth_info, "last_sign_in_at", None),
-                "confirmed": getattr(auth_info, "email_confirmed", False),
-            })
-
-        # Search and filter options
-        col1, col2 = st.columns([2, 1])
-        with col1:
-            search = st.text_input("🔍 Search by email")
-        with col2:
-            role_filter = st.selectbox("Filter by role", ["All", "user", "admin"])
+    tab1, tab2 = st.tabs(["✅ Approved Users", "⏳ Pending Approvals"])
+    
+    with tab2:
+        st.subheader("⏳ Pending User Approvals")
+        try:
+            # Get pending signups
+            pending = supabase.table("pending_signups").select("*").eq("status", "pending").execute()
+            
+            if pending.data:
+                st.info(f"📋 {len(pending.data)} users waiting for approval")
+                
+                for i, signup in enumerate(pending.data):
+                    with st.expander(f"📝 {signup['email']} - Requested Role: {signup['requested_role'].title()}"):
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            st.write(f"**Email:** {signup['email']}")
+                            st.write(f"**Requested Role:** {signup['requested_role'].title()}")
+                            st.write(f"**Submitted:** {signup['created_at']}")
+                        
+                        with col2:
+                            # Approval actions
+                            action_col1, action_col2 = st.columns(2)
+                            with action_col1:
+                                if st.button("✅ Approve", key=f"approve_{i}", type="primary"):
+                                    try:
+                                        # Create user profile
+                                        supabase.table("user_profiles").insert({
+                                            "id": signup["id"],
+                                            "email": signup["email"],
+                                            "role": signup["requested_role"],
+                                            "status": "approved"
+                                        }).execute()
+                                        
+                                        # Update pending status
+                                        supabase.table("pending_signups").update({
+                                            "status": "approved"
+                                        }).eq("id", signup["id"]).execute()
+                                        
+                                        # Enable the user account
+                                        supabase.auth.admin.update_user_by_id(signup["id"], {
+                                            "email_confirm": True
+                                        })
+                                        
+                                        st.success(f"✅ Approved {signup['email']}!")
+                                        st.rerun()
+                                    except Exception as e:
+                                        st.error(f"Failed to approve: {e}")
+                            
+                            with action_col2:
+                                if st.button("❌ Reject", key=f"reject_{i}", type="secondary"):
+                                    try:
+                                        # Update pending status to rejected
+                                        supabase.table("pending_signups").update({
+                                            "status": "rejected"
+                                        }).eq("id", signup["id"]).execute()
+                                        
+                                        # Optionally delete the auth user
+                                        supabase.auth.admin.delete_user(signup["id"])
+                                        
+                                        st.warning(f"❌ Rejected {signup['email']}")
+                                        st.rerun()
+                                    except Exception as e:
+                                        st.error(f"Failed to reject: {e}")
+            else:
+                st.success("🎉 No pending approvals!")
         
-        # Apply filters
-        filtered = user_data
-        if search:
-            filtered = [u for u in filtered if search.lower() in u["email"].lower()]
-        if role_filter != "All":
-            filtered = [u for u in filtered if u["role"] == role_filter]
+        except Exception as e:
+            st.error(f"Error loading pending approvals: {e}")
+    
+    with tab1:
+        st.subheader("✅ Approved Users")
+        try:
+            users = supabase.table("user_profiles").select("*").eq("status", "approved").execute()
+            auth_users = supabase.auth.admin.list_users()
 
-        # Bulk actions
-        st.subheader("🔧 Bulk Actions")
-        col1, col2 = st.columns(2)
-        with col1:
-            if st.button("📧 Send Welcome Email to All"):
-                st.success("Welcome emails sent to all users!")
-        with col2:
-            if st.button("⬇️ Export User Data"):
-                df = pd.DataFrame(filtered)
-                st.download_button("Download Users CSV", df.to_csv(index=False), "users.csv", "text/csv")
+            # Merge auth info + profiles
+            user_data = []
+            for profile in users.data or []:
+                auth_info = next((u for u in auth_users.user if u.id == profile["id"]), None)
+                user_data.append({
+                    "id": profile["id"],
+                    "email": profile["email"],
+                    "role": profile["role"],
+                    "status": profile.get("status", "approved"),
+                    "created_at": getattr(auth_info, "created_at", None),
+                    "last_sign_in": getattr(auth_info, "last_sign_in_at", None),
+                    "confirmed": getattr(auth_info, "email_confirmed", False),
+                })
 
-        # User list
-        if filtered:
-            for i, user in enumerate(filtered):
-                with st.expander(f"👤 {user['email']} ({user['role'].title()}) {'✅' if user['confirmed'] else '❌'}"):
-                    col1, col2 = st.columns(2)
-                    with col1:
-                        st.write(f"**User ID:** {user['id'][:8]}...")
-                        st.write(f"**Created:** {user['created_at']}")
-                        st.write(f"**Last Login:** {user['last_sign_in']}")
-                    with col2:
-                        st.write(f"**Status:** {'Confirmed' if user['confirmed'] else 'Pending'}")
-                        st.write(f"**Role:** {user['role'].title()}")
+            # Search and filter options
+            col1, col2 = st.columns([2, 1])
+            with col1:
+                search = st.text_input("🔍 Search by email")
+            with col2:
+                role_filter = st.selectbox("Filter by role", ["All", "user", "admin"])
+            
+            # Apply filters
+            filtered = user_data
+            if search:
+                filtered = [u for u in filtered if search.lower() in u["email"].lower()]
+            if role_filter != "All":
+                filtered = [u for u in filtered if u["role"] == role_filter]
 
-                    # Actions
-                    action_col1, action_col2, action_col3 = st.columns(3)
-                    with action_col1:
-                        new_role = st.selectbox("Change Role", ["user", "admin"], 
-                                                index=0 if user["role"] == "user" else 1,
-                                                key=f"role_{i}")
-                        if st.button("Update Role", key=f"update_{i}"):
-                            supabase.table("user_profiles").update({"role": new_role}).eq("id", user["id"]).execute()
-                            st.success(f"Updated {user['email']} to {new_role}")
-                            st.rerun()
-                    
-                    with action_col2:
-                        if st.button("🔄 Reset Password", key=f"reset_{i}"):
-                            reset_password(user["email"])
-                            st.success(f"Password reset sent!")
-                    
-                    with action_col3:
-                        if st.button("❌ Delete User", key=f"delete_{i}", type="secondary"):
-                            try:
-                                supabase.table("user_profiles").delete().eq("id", user["id"]).execute()
-                                supabase.auth.admin.delete_user(user["id"])
-                                st.warning(f"Deleted {user['email']}")
+            # Bulk actions
+            st.subheader("🔧 Bulk Actions")
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("📧 Send Welcome Email to All"):
+                    st.success("Welcome emails sent to all users!")
+            with col2:
+                if st.button("⬇️ Export User Data"):
+                    df = pd.DataFrame(filtered)
+                    st.download_button("Download Users CSV", df.to_csv(index=False), "users.csv", "text/csv")
+
+            # User list
+            if filtered:
+                for i, user in enumerate(filtered):
+                    with st.expander(f"👤 {user['email']} ({user['role'].title()}) {'✅' if user['confirmed'] else '❌'}"):
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            st.write(f"**User ID:** {user['id'][:8]}...")
+                            st.write(f"**Created:** {user['created_at']}")
+                            st.write(f"**Last Login:** {user['last_sign_in']}")
+                        with col2:
+                            st.write(f"**Status:** {'Confirmed' if user['confirmed'] else 'Pending'}")
+                            st.write(f"**Role:** {user['role'].title()}")
+                            st.write(f"**Approval:** {user['status'].title()}")
+
+                        # Actions
+                        action_col1, action_col2, action_col3, action_col4 = st.columns(4)
+                        with action_col1:
+                            new_role = st.selectbox("Change Role", ["user", "admin"], 
+                                                    index=0 if user["role"] == "user" else 1,
+                                                    key=f"role_{i}")
+                            if st.button("Update Role", key=f"update_{i}"):
+                                supabase.table("user_profiles").update({"role": new_role}).eq("id", user["id"]).execute()
+                                st.success(f"Updated {user['email']} to {new_role}")
                                 st.rerun()
-                            except Exception as e:
-                                st.error(f"Failed to delete: {e}")
-        else:
-            st.info("No users found matching your criteria.")
+                        
+                        with action_col2:
+                            if st.button("🔄 Reset Password", key=f"reset_{i}"):
+                                reset_password(user["email"])
+                                st.success(f"Password reset sent!")
+                        
+                        with action_col3:
+                            if user["status"] == "approved":
+                                if st.button("⏸️ Suspend", key=f"suspend_{i}"):
+                                    supabase.table("user_profiles").update({"status": "suspended"}).eq("id", user["id"]).execute()
+                                    st.warning(f"Suspended {user['email']}")
+                                    st.rerun()
+                            else:
+                                if st.button("▶️ Unsuspend", key=f"unsuspend_{i}"):
+                                    supabase.table("user_profiles").update({"status": "approved"}).eq("id", user["id"]).execute()
+                                    st.success(f"Unsuspended {user['email']}")
+                                    st.rerun()
+                        
+                        with action_col4:
+                            if st.button("❌ Delete User", key=f"delete_{i}", type="secondary"):
+                                try:
+                                    supabase.table("user_profiles").delete().eq("id", user["id"]).execute()
+                                    supabase.auth.admin.delete_user(user["id"])
+                                    st.warning(f"Deleted {user['email']}")
+                                    st.rerun()
+                                except Exception as e:
+                                    st.error(f"Failed to delete: {e}")
+            else:
+                st.info("No users found matching your criteria.")
 
-    except Exception as e:
-        st.error(f"Error loading users: {e}")
+        except Exception as e:
+            st.error(f"Error loading users: {e}")
 
 def show_system_reports():
     st.subheader("📈 System Reports")
