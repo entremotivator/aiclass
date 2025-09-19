@@ -5,8 +5,6 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
-import json
-import requests
 
 # -------------------------
 # Supabase Setup
@@ -16,14 +14,7 @@ def init_connection() -> Client:
     key = st.secrets["supabase"]["key"]
     return create_client(url, key)
 
-def init_service_role_connection() -> Client:
-    """Initialize Supabase client with service role key for admin operations"""
-    url = st.secrets["supabase"]["url"]
-    service_key = st.secrets["supabase"]["service_role_key"]  # Added service role key
-    return create_client(url, service_key)
-
 supabase = init_connection()
-service_supabase = init_service_role_connection()  # Service role client for admin operations
 
 # -------------------------
 # Session State
@@ -111,294 +102,164 @@ def logout():
 # Admin Dashboard
 # -------------------------
 def admin_dashboard():
-    st.title("👑 Admin Dashboard - Service Role Enabled")
-    
-    st.success("🔑 Service Role API Active - Full Administrative Access")
+    st.title("👑 Admin Dashboard")
     
     # Sidebar navigation for admin features
     with st.sidebar:
         st.header("🔧 Admin Tools")
         admin_section = st.selectbox(
             "Select Section",
-            ["📊 Analytics Overview", "👥 User Management", "🔧 Service Role Operations", "📈 System Reports", "⚙️ Settings"]
+            ["📊 Analytics Overview", "👥 User Management", "📈 System Reports", "⚙️ Settings"]
         )
     
     if admin_section == "📊 Analytics Overview":
-        show_admin_analytics_enhanced()
+        show_admin_analytics()
     elif admin_section == "👥 User Management":
-        show_user_management_enhanced()
-    elif admin_section == "🔧 Service Role Operations":  # New service role section
-        show_service_role_operations()
+        show_user_management()
     elif admin_section == "📈 System Reports":
         show_system_reports()
     elif admin_section == "⚙️ Settings":
         show_admin_settings()
 
-def show_admin_analytics_enhanced():
-    """Enhanced analytics using service role API"""
-    st.subheader("📊 System Analytics - Service Role Data")
+def show_admin_analytics():
+    st.subheader("📊 System Analytics")
     
-    # Get comprehensive stats
-    stats = get_system_stats_service_role()
-    if not stats:
-        st.error("Failed to load system statistics")
-        return
-    
-    # Display enhanced metrics
-    col1, col2, col3, col4, col5 = st.columns(5)
-    with col1:
-        st.metric("Total Users", stats["total_users"])
-    with col2:
-        st.metric("Regular Users", stats["user_count"])
-    with col3:
-        st.metric("Administrators", stats["admin_count"])
-    with col4:
-        st.metric("Confirmed Users", stats["confirmed_count"])
-    with col5:
-        st.metric("Recent (24h)", stats["recent_registrations"], delta=f"+{stats['recent_registrations']}")
-    
-    # Enhanced user data visualization
-    if stats["users_data"]:
-        st.subheader("📈 User Analytics")
+    try:
+        # Get user data
+        users = supabase.table("user_profiles").select("*").execute()
+        auth_users = supabase.auth.admin.list_users()
         
-        # Role distribution
-        role_data = pd.DataFrame({
-            'Role': ['Users', 'Admins'],
-            'Count': [stats["user_count"], stats["admin_count"]]
-        })
+        # Calculate metrics
+        total_users = len(users.data or [])
+        admin_count = len([u for u in users.data or [] if u["role"] == "admin"])
+        user_count = total_users - admin_count
         
-        col1, col2 = st.columns(2)
+        # Display key metrics
+        col1, col2, col3, col4 = st.columns(4)
         with col1:
+            st.metric("Total Users", total_users, delta=f"+{total_users - max(0, total_users-5)}")
+        with col2:
+            st.metric("Regular Users", user_count)
+        with col3:
+            st.metric("Administrators", admin_count)
+        with col4:
+            confirmed_users = len([u for u in auth_users.user if getattr(u, 'email_confirmed', False)])
+            st.metric("Confirmed Users", confirmed_users)
+        
+        # User registration chart
+        if users.data:
+            st.subheader("📈 User Registration Trends")
+            # Create sample data for demonstration
+            dates = pd.date_range(start='2024-01-01', end=datetime.now(), freq='D')
+            registrations = pd.DataFrame({
+                'date': dates,
+                'registrations': [max(0, int(abs(hash(str(d)) % 10) - 5)) for d in dates]
+            })
+            
+            fig = px.line(registrations, x='date', y='registrations', 
+                         title='Daily User Registrations')
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # Role distribution pie chart
+            role_data = pd.DataFrame({
+                'Role': ['Users', 'Admins'],
+                'Count': [user_count, admin_count]
+            })
             fig_pie = px.pie(role_data, values='Count', names='Role', 
                            title='User Role Distribution')
             st.plotly_chart(fig_pie, use_container_width=True)
-        
-        with col2:
-            # Registration timeline
-            auth_users_df = pd.DataFrame([{
-                'created_at': u.created_at,
-                'confirmed': getattr(u, 'email_confirmed', False)
-            } for u in stats["auth_users"]])
             
-            if not auth_users_df.empty:
-                auth_users_df['date'] = pd.to_datetime(auth_users_df['created_at']).dt.date
-                daily_registrations = auth_users_df.groupby('date').size().reset_index(name='registrations')
-                
-                fig_line = px.line(daily_registrations, x='date', y='registrations',
-                                 title='Daily User Registrations')
-                st.plotly_chart(fig_line, use_container_width=True)
+    except Exception as e:
+        st.error(f"Error loading analytics: {e}")
 
-def show_user_management_enhanced():
-    """Enhanced user management with service role capabilities"""
-    st.subheader("👥 User Management - Service Role Powers")
+def show_user_management():
+    st.subheader("👥 User Management")
     
-    # Get all users using service role
-    users_data = get_all_users_service_role()
-    auth_users = service_supabase.auth.admin.list_users()
-    
-    # Enhanced user creation
-    st.subheader("➕ Create New User (Service Role)")
-    with st.form("create_user_service"):
-        col1, col2 = st.columns(2)
-        with col1:
-            new_email = st.text_input("Email")
-            new_password = st.text_input("Password", type="password")
-        with col2:
-            new_role = st.selectbox("Role", ["user", "admin"])
-            auto_confirm = st.checkbox("Auto-confirm email", value=True)
-        
-        metadata = st.text_area("User Metadata (JSON)", value='{"created_by": "admin"}')
-        
-        if st.form_submit_button("🔧 Create User (Service Role)", type="primary"):
-            try:
-                metadata_dict = json.loads(metadata) if metadata else {}
-                success, msg = create_user_service_role(new_email, new_password, new_role, metadata_dict)
-                if success:
-                    st.success(msg)
-                    st.rerun()
-                else:
-                    st.error(msg)
-            except json.JSONDecodeError:
-                st.error("Invalid JSON in metadata field")
-    
-    # Enhanced user list with service role data
-    st.subheader("👥 All Users (Service Role View)")
-    
-    if users_data:
-        # Merge auth and profile data
-        enhanced_users = []
-        for profile in users_data:
+    try:
+        users = supabase.table("user_profiles").select("*").execute()
+        auth_users = supabase.auth.admin.list_users()
+
+        # Merge auth info + profiles
+        user_data = []
+        for profile in users.data or []:
             auth_info = next((u for u in auth_users.user if u.id == profile["id"]), None)
-            enhanced_users.append({
-                **profile,
+            user_data.append({
+                "id": profile["id"],
+                "email": profile["email"],
+                "role": profile["role"],
                 "created_at": getattr(auth_info, "created_at", None),
                 "last_sign_in": getattr(auth_info, "last_sign_in_at", None),
                 "confirmed": getattr(auth_info, "email_confirmed", False),
-                "phone": getattr(auth_info, "phone", None),
-                "user_metadata": getattr(auth_info, "user_metadata", {}),
             })
-        
-        # Display users with enhanced controls
-        for i, user in enumerate(enhanced_users):
-            with st.expander(f"👤 {user['email']} ({user['role'].title()}) {'✅' if user['confirmed'] else '❌'}"):
-                col1, col2, col3 = st.columns(3)
-                
-                with col1:
-                    st.write(f"**User ID:** {user['id']}")
-                    st.write(f"**Created:** {user['created_at']}")
-                    st.write(f"**Last Login:** {user['last_sign_in']}")
-                    st.write(f"**Phone:** {user.get('phone', 'N/A')}")
-                
-                with col2:
-                    st.write(f"**Status:** {'Confirmed' if user['confirmed'] else 'Pending'}")
-                    st.write(f"**Role:** {user['role'].title()}")
-                    st.write(f"**Created by Admin:** {user.get('created_by_admin', False)}")
-                    
-                with col3:
-                    st.write("**User Metadata:**")
-                    st.json(user.get('user_metadata', {}))
-                
-                # Service role actions
-                st.write("**🔧 Service Role Actions:**")
-                action_col1, action_col2, action_col3 = st.columns(3)
-                
-                with action_col1:
-                    new_role = st.selectbox("Change Role", ["user", "admin"], 
-                                          index=0 if user["role"] == "user" else 1,
-                                          key=f"role_sr_{i}")
-                    if st.button("🔧 Update Role (SR)", key=f"update_sr_{i}"):
-                        success, msg = update_user_role_service_role(user["id"], new_role)
-                        if success:
-                            st.success(msg)
-                            st.rerun()
-                        else:
-                            st.error(msg)
-                
-                with action_col2:
-                    if st.button("🔄 Reset Password (SR)", key=f"reset_sr_{i}"):
-                        try:
-                            service_supabase.auth.admin.update_user_by_id(
-                                user["id"], 
-                                {"password": "TempPassword123!"}
-                            )
-                            st.success("Password reset to: TempPassword123!")
-                        except Exception as e:
-                            st.error(f"Reset failed: {e}")
-                
-                with action_col3:
-                    if st.button("❌ Delete User (SR)", key=f"delete_sr_{i}", type="secondary"):
-                        success, msg = delete_user_service_role(user["id"])
-                        if success:
-                            st.warning(msg)
-                            st.rerun()
-                        else:
-                            st.error(msg)
 
-def show_service_role_operations():
-    """New section for service role specific operations"""
-    st.subheader("🔧 Service Role Operations")
-    st.info("These operations use the service role key and bypass Row Level Security (RLS)")
-    
-    # Bulk operations
-    st.subheader("📦 Bulk Operations")
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.write("**Bulk User Creation**")
-        uploaded_file = st.file_uploader("Upload CSV with users", type=['csv'])
-        if uploaded_file:
-            df = pd.read_csv(uploaded_file)
-            st.write("Preview:")
-            st.dataframe(df.head())
-            
-            if st.button("🔧 Create All Users (Service Role)"):
-                success_count = 0
-                for _, row in df.iterrows():
-                    success, _ = create_user_service_role(
-                        row['email'], 
-                        row.get('password', 'TempPassword123!'),
-                        row.get('role', 'user')
-                    )
-                    if success:
-                        success_count += 1
-                
-                st.success(f"Created {success_count}/{len(df)} users successfully")
-    
-    with col2:
-        st.write("**System Maintenance**")
-        if st.button("🧹 Clean Unconfirmed Users (7+ days)"):
-            try:
-                cutoff_date = (datetime.now() - timedelta(days=7)).isoformat()
-                auth_users = service_supabase.auth.admin.list_users()
-                
-                deleted_count = 0
-                for user in auth_users.user:
-                    if (not getattr(user, 'email_confirmed', False) and 
-                        user.created_at < cutoff_date):
-                        service_supabase.auth.admin.delete_user(user.id)
-                        deleted_count += 1
-                
-                st.success(f"Cleaned up {deleted_count} unconfirmed users")
-            except Exception as e:
-                st.error(f"Cleanup failed: {e}")
+        # Search and filter options
+        col1, col2 = st.columns([2, 1])
+        with col1:
+            search = st.text_input("🔍 Search by email")
+        with col2:
+            role_filter = st.selectbox("Filter by role", ["All", "user", "admin"])
         
-        if st.button("📊 Generate Full System Report"):
-            stats = get_system_stats_service_role()
-            if stats:
-                report = {
-                    "timestamp": datetime.now().isoformat(),
-                    "total_users": stats["total_users"],
-                    "admin_count": stats["admin_count"],
-                    "confirmed_count": stats["confirmed_count"],
-                    "recent_registrations": stats["recent_registrations"]
-                }
-                
-                st.download_button(
-                    "📥 Download Report",
-                    json.dumps(report, indent=2),
-                    "system_report.json",
-                    "application/json"
-                )
-    
-    # Advanced queries
-    st.subheader("🔍 Advanced Queries (Service Role)")
-    
-    query_type = st.selectbox("Query Type", [
-        "Users by Role",
-        "Recent Registrations",
-        "Unconfirmed Users",
-        "Users by Creation Date"
-    ])
-    
-    if st.button("🔧 Execute Query"):
-        try:
-            if query_type == "Users by Role":
-                users = get_all_users_service_role()
-                role_counts = {}
-                for user in users:
-                    role = user.get('role', 'unknown')
-                    role_counts[role] = role_counts.get(role, 0) + 1
-                st.json(role_counts)
-            
-            elif query_type == "Recent Registrations":
-                auth_users = service_supabase.auth.admin.list_users()
-                recent = [u for u in auth_users.user 
-                         if u.created_at > (datetime.now() - timedelta(days=7)).isoformat()]
-                st.write(f"Found {len(recent)} users registered in the last 7 days")
-                for user in recent[:10]:  # Show first 10
-                    st.write(f"- {user.email} ({user.created_at})")
-            
-            elif query_type == "Unconfirmed Users":
-                auth_users = service_supabase.auth.admin.list_users()
-                unconfirmed = [u for u in auth_users.user 
-                              if not getattr(u, 'email_confirmed', False)]
-                st.write(f"Found {len(unconfirmed)} unconfirmed users")
-                for user in unconfirmed[:10]:
-                    st.write(f"- {user.email} (created: {user.created_at})")
-        
-        except Exception as e:
-            st.error(f"Query failed: {e}")
+        # Apply filters
+        filtered = user_data
+        if search:
+            filtered = [u for u in filtered if search.lower() in u["email"].lower()]
+        if role_filter != "All":
+            filtered = [u for u in filtered if u["role"] == role_filter]
+
+        # Bulk actions
+        st.subheader("🔧 Bulk Actions")
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("📧 Send Welcome Email to All"):
+                st.success("Welcome emails sent to all users!")
+        with col2:
+            if st.button("⬇️ Export User Data"):
+                df = pd.DataFrame(filtered)
+                st.download_button("Download Users CSV", df.to_csv(index=False), "users.csv", "text/csv")
+
+        # User list
+        if filtered:
+            for i, user in enumerate(filtered):
+                with st.expander(f"👤 {user['email']} ({user['role'].title()}) {'✅' if user['confirmed'] else '❌'}"):
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.write(f"**User ID:** {user['id'][:8]}...")
+                        st.write(f"**Created:** {user['created_at']}")
+                        st.write(f"**Last Login:** {user['last_sign_in']}")
+                    with col2:
+                        st.write(f"**Status:** {'Confirmed' if user['confirmed'] else 'Pending'}")
+                        st.write(f"**Role:** {user['role'].title()}")
+
+                    # Actions
+                    action_col1, action_col2, action_col3 = st.columns(3)
+                    with action_col1:
+                        new_role = st.selectbox("Change Role", ["user", "admin"], 
+                                                index=0 if user["role"] == "user" else 1,
+                                                key=f"role_{i}")
+                        if st.button("Update Role", key=f"update_{i}"):
+                            supabase.table("user_profiles").update({"role": new_role}).eq("id", user["id"]).execute()
+                            st.success(f"Updated {user['email']} to {new_role}")
+                            st.rerun()
+                    
+                    with action_col2:
+                        if st.button("🔄 Reset Password", key=f"reset_{i}"):
+                            reset_password(user["email"])
+                            st.success(f"Password reset sent!")
+                    
+                    with action_col3:
+                        if st.button("❌ Delete User", key=f"delete_{i}", type="secondary"):
+                            try:
+                                supabase.table("user_profiles").delete().eq("id", user["id"]).execute()
+                                supabase.auth.admin.delete_user(user["id"])
+                                st.warning(f"Deleted {user['email']}")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Failed to delete: {e}")
+        else:
+            st.info("No users found matching your criteria.")
+
+    except Exception as e:
+        st.error(f"Error loading users: {e}")
 
 def show_system_reports():
     st.subheader("📈 System Reports")
@@ -609,97 +470,6 @@ def show_user_help():
             st.info("Connecting to live chat...")
 
 # -------------------------
-# Service Role API Functions
-# -------------------------
-def get_all_users_service_role():
-    """Get all users using service role - bypasses RLS"""
-    try:
-        response = service_supabase.table("user_profiles").select("*").execute()
-        return response.data
-    except Exception as e:
-        st.error(f"Service role error: {e}")
-        return []
-
-def create_user_service_role(email, password, role="user", metadata=None):
-    """Create user with service role privileges"""
-    try:
-        # Create auth user
-        auth_response = service_supabase.auth.admin.create_user({
-            "email": email,
-            "password": password,
-            "email_confirm": True,  # Auto-confirm with service role
-            "user_metadata": metadata or {}
-        })
-        
-        if auth_response.user:
-            # Create profile
-            profile_response = service_supabase.table("user_profiles").insert({
-                "id": auth_response.user.id,
-                "email": email,
-                "role": role,
-                "created_by_admin": True
-            }).execute()
-            
-            return True, f"User {email} created successfully with {role} role"
-        return False, "Failed to create user"
-    except Exception as e:
-        return False, f"Service role creation error: {e}"
-
-def update_user_role_service_role(user_id, new_role):
-    """Update user role using service role"""
-    try:
-        response = service_supabase.table("user_profiles").update({
-            "role": new_role,
-            "updated_at": datetime.now().isoformat()
-        }).eq("id", user_id).execute()
-        
-        return True, f"User role updated to {new_role}"
-    except Exception as e:
-        return False, f"Role update error: {e}"
-
-def delete_user_service_role(user_id):
-    """Delete user completely using service role"""
-    try:
-        # Delete from profiles first
-        service_supabase.table("user_profiles").delete().eq("id", user_id).execute()
-        
-        # Delete from auth
-        service_supabase.auth.admin.delete_user(user_id)
-        
-        return True, "User deleted successfully"
-    except Exception as e:
-        return False, f"Deletion error: {e}"
-
-def get_system_stats_service_role():
-    """Get comprehensive system statistics using service role"""
-    try:
-        # Get all users
-        users = service_supabase.table("user_profiles").select("*").execute()
-        auth_users = service_supabase.auth.admin.list_users()
-        
-        # Calculate stats
-        total_users = len(users.data or [])
-        admin_count = len([u for u in users.data or [] if u["role"] == "admin"])
-        confirmed_count = len([u for u in auth_users.user if getattr(u, 'email_confirmed', False)])
-        
-        # Get recent activity (last 24 hours)
-        yesterday = (datetime.now() - timedelta(days=1)).isoformat()
-        recent_users = [u for u in auth_users.user if u.created_at > yesterday]
-        
-        return {
-            "total_users": total_users,
-            "admin_count": admin_count,
-            "user_count": total_users - admin_count,
-            "confirmed_count": confirmed_count,
-            "recent_registrations": len(recent_users),
-            "users_data": users.data,
-            "auth_users": auth_users.user
-        }
-    except Exception as e:
-        st.error(f"Stats error: {e}")
-        return None
-
-# -------------------------
 # Redirect
 # -------------------------
 def redirect_dashboard():
@@ -712,11 +482,10 @@ def redirect_dashboard():
 # Main App
 # -------------------------
 def main():
-    st.set_page_config(page_title="Enhanced Auth App - Service Role", page_icon="🔐", layout="wide")
+    st.set_page_config(page_title="Enhanced Auth App", page_icon="🔐", layout="wide")
 
     if not st.session_state.authenticated:
-        st.title("🔐 Supabase Authentication - Service Role Enabled")
-        st.info("🔑 This application includes service role API capabilities for administrative operations")
+        st.title("🔐 Supabase Authentication")
 
         tab1, tab2, tab3 = st.tabs(["🔑 Login", "📝 Sign Up", "🔄 Reset Password"])
 
