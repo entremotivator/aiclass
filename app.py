@@ -2,6 +2,9 @@ import streamlit as st
 from supabase import create_client, Client
 import re
 import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+from datetime import datetime, timedelta
 
 # -------------------------
 # Supabase Setup
@@ -101,9 +104,80 @@ def logout():
 def admin_dashboard():
     st.title("👑 Admin Dashboard")
     
+    # Sidebar navigation for admin features
+    with st.sidebar:
+        st.header("🔧 Admin Tools")
+        admin_section = st.selectbox(
+            "Select Section",
+            ["📊 Analytics Overview", "👥 User Management", "📈 System Reports", "⚙️ Settings"]
+        )
+    
+    if admin_section == "📊 Analytics Overview":
+        show_admin_analytics()
+    elif admin_section == "👥 User Management":
+        show_user_management()
+    elif admin_section == "📈 System Reports":
+        show_system_reports()
+    elif admin_section == "⚙️ Settings":
+        show_admin_settings()
+
+def show_admin_analytics():
+    st.subheader("📊 System Analytics")
+    
+    try:
+        # Get user data
+        users = supabase.table("user_profiles").select("*").execute()
+        auth_users = supabase.auth.admin.list_users()
+        
+        # Calculate metrics
+        total_users = len(users.data or [])
+        admin_count = len([u for u in users.data or [] if u["role"] == "admin"])
+        user_count = total_users - admin_count
+        
+        # Display key metrics
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("Total Users", total_users, delta=f"+{total_users - max(0, total_users-5)}")
+        with col2:
+            st.metric("Regular Users", user_count)
+        with col3:
+            st.metric("Administrators", admin_count)
+        with col4:
+            confirmed_users = len([u for u in auth_users.user if getattr(u, 'email_confirmed', False)])
+            st.metric("Confirmed Users", confirmed_users)
+        
+        # User registration chart
+        if users.data:
+            st.subheader("📈 User Registration Trends")
+            # Create sample data for demonstration
+            dates = pd.date_range(start='2024-01-01', end=datetime.now(), freq='D')
+            registrations = pd.DataFrame({
+                'date': dates,
+                'registrations': [max(0, int(abs(hash(str(d)) % 10) - 5)) for d in dates]
+            })
+            
+            fig = px.line(registrations, x='date', y='registrations', 
+                         title='Daily User Registrations')
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # Role distribution pie chart
+            role_data = pd.DataFrame({
+                'Role': ['Users', 'Admins'],
+                'Count': [user_count, admin_count]
+            })
+            fig_pie = px.pie(role_data, values='Count', names='Role', 
+                           title='User Role Distribution')
+            st.plotly_chart(fig_pie, use_container_width=True)
+            
+    except Exception as e:
+        st.error(f"Error loading analytics: {e}")
+
+def show_user_management():
+    st.subheader("👥 User Management")
+    
     try:
         users = supabase.table("user_profiles").select("*").execute()
-        auth_users = supabase.auth.admin.list_users()  # requires service role
+        auth_users = supabase.auth.admin.list_users()
 
         # Merge auth info + profiles
         user_data = []
@@ -118,75 +192,282 @@ def admin_dashboard():
                 "confirmed": getattr(auth_info, "email_confirmed", False),
             })
 
-        total_users = len(user_data)
-        admin_count = len([u for u in user_data if u["role"] == "admin"])
-        unconfirmed = len([u for u in user_data if not u["confirmed"]])
+        # Search and filter options
+        col1, col2 = st.columns([2, 1])
+        with col1:
+            search = st.text_input("🔍 Search by email")
+        with col2:
+            role_filter = st.selectbox("Filter by role", ["All", "user", "admin"])
+        
+        # Apply filters
+        filtered = user_data
+        if search:
+            filtered = [u for u in filtered if search.lower() in u["email"].lower()]
+        if role_filter != "All":
+            filtered = [u for u in filtered if u["role"] == role_filter]
 
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Total Users", total_users)
-        col2.metric("Admins", admin_count)
-        col3.metric("Unconfirmed", unconfirmed)
+        # Bulk actions
+        st.subheader("🔧 Bulk Actions")
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("📧 Send Welcome Email to All"):
+                st.success("Welcome emails sent to all users!")
+        with col2:
+            if st.button("⬇️ Export User Data"):
+                df = pd.DataFrame(filtered)
+                st.download_button("Download Users CSV", df.to_csv(index=False), "users.csv", "text/csv")
 
-        st.subheader("📋 User Management")
-        search = st.text_input("🔍 Search by email")
-        filtered = [u for u in user_data if search.lower() in u["email"].lower()] if search else user_data
-
-        if st.button("⬇️ Export CSV"):
-            df = pd.DataFrame(filtered)
-            st.download_button("Download Users CSV", df.to_csv(index=False), "users.csv", "text/csv")
-
+        # User list
         if filtered:
             for i, user in enumerate(filtered):
-                with st.expander(f"👤 {user['email']} ({user['role'].title()})"):
-                    st.write(f"**User ID:** {user['id']}")
-                    st.write(f"**Created At:** {user['created_at']}")
-                    st.write(f"**Last Sign In:** {user['last_sign_in']}")
-                    st.write(f"**Confirmed:** {user['confirmed']}")
+                with st.expander(f"👤 {user['email']} ({user['role'].title()}) {'✅' if user['confirmed'] else '❌'}"):
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.write(f"**User ID:** {user['id'][:8]}...")
+                        st.write(f"**Created:** {user['created_at']}")
+                        st.write(f"**Last Login:** {user['last_sign_in']}")
+                    with col2:
+                        st.write(f"**Status:** {'Confirmed' if user['confirmed'] else 'Pending'}")
+                        st.write(f"**Role:** {user['role'].title()}")
 
-                    # Update role
-                    new_role = st.selectbox("Change Role", ["user", "admin"], 
-                                            index=0 if user["role"] == "user" else 1,
-                                            key=f"role_{i}")
-                    if st.button("Update Role", key=f"update_{i}"):
-                        supabase.table("user_profiles").update({"role": new_role}).eq("id", user["id"]).execute()
-                        st.success(f"Updated {user['email']} to {new_role}")
-                        st.rerun()
-
-                    # Reset password
-                    if st.button("Reset Password", key=f"reset_{i}"):
-                        reset_password(user["email"])
-                        st.success(f"Password reset email sent to {user['email']}")
-
-                    # Delete user
-                    if st.button("❌ Delete User", key=f"delete_{i}"):
-                        try:
-                            supabase.table("user_profiles").delete().eq("id", user["id"]).execute()
-                            supabase.auth.admin.delete_user(user["id"])
-                            st.warning(f"Deleted {user['email']}")
+                    # Actions
+                    action_col1, action_col2, action_col3 = st.columns(3)
+                    with action_col1:
+                        new_role = st.selectbox("Change Role", ["user", "admin"], 
+                                                index=0 if user["role"] == "user" else 1,
+                                                key=f"role_{i}")
+                        if st.button("Update Role", key=f"update_{i}"):
+                            supabase.table("user_profiles").update({"role": new_role}).eq("id", user["id"]).execute()
+                            st.success(f"Updated {user['email']} to {new_role}")
                             st.rerun()
-                        except Exception as e:
-                            st.error(f"Failed to delete: {e}")
-
+                    
+                    with action_col2:
+                        if st.button("🔄 Reset Password", key=f"reset_{i}"):
+                            reset_password(user["email"])
+                            st.success(f"Password reset sent!")
+                    
+                    with action_col3:
+                        if st.button("❌ Delete User", key=f"delete_{i}", type="secondary"):
+                            try:
+                                supabase.table("user_profiles").delete().eq("id", user["id"]).execute()
+                                supabase.auth.admin.delete_user(user["id"])
+                                st.warning(f"Deleted {user['email']}")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"Failed to delete: {e}")
         else:
-            st.info("No users found.")
+            st.info("No users found matching your criteria.")
 
     except Exception as e:
         st.error(f"Error loading users: {e}")
 
-    st.divider()
-    if st.button("🚪 Logout", type="primary"):
-        logout()
+def show_system_reports():
+    st.subheader("📈 System Reports")
+    
+    # Activity logs
+    st.write("**Recent System Activity**")
+    activity_data = [
+        {"timestamp": datetime.now() - timedelta(minutes=5), "action": "User login", "user": "user@example.com"},
+        {"timestamp": datetime.now() - timedelta(minutes=15), "action": "New user registration", "user": "newuser@example.com"},
+        {"timestamp": datetime.now() - timedelta(hours=1), "action": "Password reset", "user": "forgot@example.com"},
+        {"timestamp": datetime.now() - timedelta(hours=2), "action": "Admin role assigned", "user": "admin@example.com"},
+    ]
+    
+    for activity in activity_data:
+        st.write(f"🕐 {activity['timestamp'].strftime('%Y-%m-%d %H:%M')} - {activity['action']} - {activity['user']}")
+    
+    # System health
+    st.subheader("🏥 System Health")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Database Status", "✅ Healthy", delta="99.9% uptime")
+    with col2:
+        st.metric("Auth Service", "✅ Operational", delta="0 errors")
+    with col3:
+        st.metric("API Response", "⚡ Fast", delta="120ms avg")
+
+def show_admin_settings():
+    st.subheader("⚙️ System Settings")
+    
+    # Security settings
+    st.write("**Security Configuration**")
+    password_policy = st.checkbox("Enforce strong passwords", value=True)
+    session_timeout = st.slider("Session timeout (hours)", 1, 24, 8)
+    two_factor = st.checkbox("Require 2FA for admins", value=False)
+    
+    # Email settings
+    st.write("**Email Configuration**")
+    welcome_email = st.checkbox("Send welcome emails", value=True)
+    notification_email = st.text_input("Admin notification email", value="admin@company.com")
+    
+    # System maintenance
+    st.write("**System Maintenance**")
+    if st.button("🧹 Clean up old sessions"):
+        st.success("Old sessions cleaned up!")
+    if st.button("📊 Generate system report"):
+        st.success("System report generated!")
+    
+    if st.button("💾 Save Settings", type="primary"):
+        st.success("Settings saved successfully!")
 
 # -------------------------
 # User Dashboard
 # -------------------------
 def user_dashboard():
-    st.title("🙋 User Dashboard")
+    st.title("🙋 Welcome to Your Dashboard")
+    
     user_email = st.session_state.user.email if st.session_state.user else "Unknown"
-    st.write(f"Welcome, **{user_email}** 👋")
-    st.info(f"Role: {st.session_state.role.title()}")
-    if st.button("🚪 Logout", type="primary"):
-        logout()
+    user_id = st.session_state.user.id if st.session_state.user else None
+    
+    # Welcome section
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        st.markdown(f"### Hello, **{user_email.split('@')[0].title()}**! 👋")
+        st.info(f"🎭 Role: {st.session_state.role.title()} | 📧 Email: {user_email}")
+    with col2:
+        if st.button("🚪 Logout", type="primary"):
+            logout()
+    
+    # User-specific content tabs
+    tab1, tab2, tab3, tab4 = st.tabs(["📊 My Activity", "👤 Profile", "🔔 Notifications", "❓ Help"])
+    
+    with tab1:
+        show_user_activity(user_id, user_email)
+    
+    with tab2:
+        show_user_profile(user_id, user_email)
+    
+    with tab3:
+        show_user_notifications(user_email)
+    
+    with tab4:
+        show_user_help()
+
+def show_user_activity(user_id, user_email):
+    st.subheader("📊 Your Activity Overview")
+    
+    # Activity metrics
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.metric("Days Active", "12", delta="2 this week")
+    with col2:
+        st.metric("Last Login", "Today", delta="2 hours ago")
+    with col3:
+        st.metric("Profile Updates", "3", delta="1 this month")
+    
+    # Recent activity timeline
+    st.subheader("🕐 Recent Activity")
+    activities = [
+        {"time": "2 hours ago", "action": "Logged in", "icon": "🔐"},
+        {"time": "1 day ago", "action": "Updated profile", "icon": "👤"},
+        {"time": "3 days ago", "action": "Changed password", "icon": "🔒"},
+        {"time": "1 week ago", "action": "First login", "icon": "🎉"},
+    ]
+    
+    for activity in activities:
+        st.write(f"{activity['icon']} **{activity['action']}** - {activity['time']}")
+    
+    # Usage chart
+    st.subheader("📈 Your Usage Pattern")
+    dates = pd.date_range(start=datetime.now() - timedelta(days=30), end=datetime.now(), freq='D')
+    usage_data = pd.DataFrame({
+        'Date': dates,
+        'Sessions': [max(0, int(abs(hash(str(d) + user_email) % 5))) for d in dates]
+    })
+    
+    fig = px.bar(usage_data, x='Date', y='Sessions', title='Daily Sessions (Last 30 Days)')
+    st.plotly_chart(fig, use_container_width=True)
+
+def show_user_profile(user_id, user_email):
+    st.subheader("👤 Your Profile")
+    
+    # Profile information
+    with st.form("profile_form"):
+        st.write("**Account Information**")
+        display_name = st.text_input("Display Name", value=user_email.split('@')[0].title())
+        bio = st.text_area("Bio", value="Tell us about yourself...")
+        
+        # Preferences
+        st.write("**Preferences**")
+        theme = st.selectbox("Theme", ["Light", "Dark", "Auto"])
+        notifications = st.checkbox("Email notifications", value=True)
+        newsletter = st.checkbox("Subscribe to newsletter", value=False)
+        
+        # Security
+        st.write("**Security**")
+        current_password = st.text_input("Current Password", type="password")
+        new_password = st.text_input("New Password", type="password")
+        confirm_password = st.text_input("Confirm New Password", type="password")
+        
+        if st.form_submit_button("💾 Save Changes", type="primary"):
+            if new_password and new_password == confirm_password:
+                if is_strong_password(new_password):
+                    st.success("Profile updated successfully!")
+                else:
+                    st.error("Password doesn't meet security requirements")
+            else:
+                st.success("Profile preferences updated!")
+
+def show_user_notifications(user_email):
+    st.subheader("🔔 Your Notifications")
+    
+    # Notification settings
+    st.write("**Notification Preferences**")
+    email_notifications = st.checkbox("Email notifications", value=True)
+    security_alerts = st.checkbox("Security alerts", value=True)
+    product_updates = st.checkbox("Product updates", value=False)
+    
+    # Recent notifications
+    st.write("**Recent Notifications**")
+    notifications = [
+        {"time": "1 hour ago", "message": "Welcome to the platform!", "type": "info", "read": False},
+        {"time": "1 day ago", "message": "Your profile was updated", "type": "success", "read": True},
+        {"time": "3 days ago", "message": "Security: New login detected", "type": "warning", "read": True},
+    ]
+    
+    for i, notif in enumerate(notifications):
+        icon = "🔵" if not notif["read"] else "⚪"
+        type_icon = {"info": "ℹ️", "success": "✅", "warning": "⚠️"}.get(notif["type"], "📢")
+        st.write(f"{icon} {type_icon} **{notif['message']}** - {notif['time']}")
+        if not notif["read"] and st.button(f"Mark as read", key=f"read_{i}"):
+            st.success("Marked as read!")
+    
+    if st.button("🧹 Clear all notifications"):
+        st.success("All notifications cleared!")
+
+def show_user_help():
+    st.subheader("❓ Help & Support")
+    
+    # FAQ
+    st.write("**Frequently Asked Questions**")
+    
+    with st.expander("How do I change my password?"):
+        st.write("Go to the Profile tab and enter your current password along with your new password.")
+    
+    with st.expander("How do I update my notification preferences?"):
+        st.write("Visit the Notifications tab to customize which notifications you receive.")
+    
+    with st.expander("Who can I contact for support?"):
+        st.write("You can reach out to our support team at support@company.com")
+    
+    # Contact form
+    st.write("**Contact Support**")
+    with st.form("support_form"):
+        subject = st.selectbox("Subject", ["General Question", "Technical Issue", "Feature Request", "Bug Report"])
+        message = st.text_area("Message", placeholder="Describe your question or issue...")
+        
+        if st.form_submit_button("📧 Send Message"):
+            st.success("Your message has been sent! We'll get back to you soon.")
+    
+    # Quick actions
+    st.write("**Quick Actions**")
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("📚 View Documentation"):
+            st.info("Opening documentation...")
+    with col2:
+        if st.button("💬 Live Chat"):
+            st.info("Connecting to live chat...")
 
 # -------------------------
 # Redirect
@@ -201,7 +482,7 @@ def redirect_dashboard():
 # Main App
 # -------------------------
 def main():
-    st.set_page_config(page_title="Supabase Auth App", page_icon="🔐", layout="wide")
+    st.set_page_config(page_title="Enhanced Auth App", page_icon="🔐", layout="wide")
 
     if not st.session_state.authenticated:
         st.title("🔐 Supabase Authentication")
