@@ -1,466 +1,262 @@
 import streamlit as st
-from supabase import create_client, Client
 import os
-from typing import Optional, List
+from supabase import create_client, Client
 import pandas as pd
 from datetime import datetime
+import json
 
-# Initialize Supabase client with service role key
 @st.cache_resource
 def init_service_client():
-    url = st.secrets["SUPABASE_URL"]
-    service_key = st.secrets["SUPABASE_SERVICE_ROLE_KEY"]
-    return create_client(url, service_key)
-
-def get_user_by_email(email: str) -> Optional[dict]:
-    """Get user by email using service role client"""
-    supabase = init_service_client()
+    """Initialize Supabase service role client with caching"""
     try:
-        # Get user from auth.users
-        response = supabase.auth.admin.list_users()
-        users = response.data.users if hasattr(response.data, 'users') else []
+        url = st.secrets.get("SUPABASE_URL") or os.getenv("SUPABASE_URL")
+        service_key = st.secrets.get("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_SERVICE_ROLE_KEY")
         
-        for user in users:
-            if user.email == email:
-                return user
-        return None
+        if not url or not service_key:
+            st.error("❌ Missing Supabase configuration. Please check your secrets.toml file.")
+            st.stop()
+        
+        # Test connection
+        client = create_client(url, service_key)
+        
+        # Test with a simple query
+        test_response = client.table("profiles").select("id").limit(1).execute()
+        
+        st.success("✅ Service role client initialized successfully")
+        return client
+        
     except Exception as e:
-        st.error(f"Error fetching user: {str(e)}")
-        return None
+        st.error(f"❌ Failed to initialize service client: {str(e)}")
+        st.stop()
 
-def get_user_by_id(user_id: str) -> Optional[dict]:
-    """Get user by ID using service role client"""
-    supabase = init_service_client()
+def get_all_users(supabase: Client):
+    """Get all users with profiles and roles"""
     try:
-        response = supabase.auth.admin.get_user_by_id(user_id)
-        return response.user if response.user else None
-    except Exception as e:
-        st.error(f"Error fetching user by ID: {str(e)}")
-        return None
-
-def get_all_users() -> List[dict]:
-    """Get all users with their profile information"""
-    supabase = init_service_client()
-    try:
-        # Get all users from auth
+        # Get auth users
         auth_response = supabase.auth.admin.list_users()
-        auth_users = auth_response.data.users if hasattr(auth_response.data, 'users') else []
         
-        # Get all profiles
+        if hasattr(auth_response, 'data') and hasattr(auth_response.data, 'users'):
+            auth_users = auth_response.data.users
+        elif isinstance(auth_response, list):
+            auth_users = auth_response
+        else:
+            auth_users = []
+        
+        # Get profiles
         profiles_response = supabase.table("profiles").select("*").execute()
-        profiles = {profile['id']: profile for profile in profiles_response.data}
+        profiles = {p['id']: p for p in profiles_response.data} if profiles_response.data else {}
         
-        # Get all user roles
+        # Get user roles
         roles_response = supabase.table("user_roles").select("*").execute()
-        roles = {role['user_id']: role['role'] for role in roles_response.data}
+        user_roles = {r['user_id']: r['role'] for r in roles_response.data} if roles_response.data else {}
         
-        # Combine the data
-        combined_users = []
+        # Combine data
+        users = []
         for user in auth_users:
             profile = profiles.get(user.id, {})
-            role = roles.get(user.id, profile.get('role', 'user'))
+            role = user_roles.get(user.id, profile.get('role', 'user'))
             
-            combined_users.append({
+            users.append({
                 'id': user.id,
                 'email': user.email,
-                'full_name': profile.get('full_name', user.user_metadata.get('full_name', 'N/A')),
-                'role': role,
                 'created_at': user.created_at,
-                'last_sign_in_at': user.last_sign_in_at,
                 'email_confirmed_at': user.email_confirmed_at,
-                'phone': user.phone,
-                'user_metadata': user.user_metadata,
-                'app_metadata': user.app_metadata
+                'last_sign_in_at': user.last_sign_in_at,
+                'role': role,
+                'full_name': profile.get('full_name', ''),
+                'avatar_url': profile.get('avatar_url', ''),
+                'updated_at': profile.get('updated_at', '')
             })
         
-        return combined_users
+        return users
+        
     except Exception as e:
-        st.error(f"Error fetching all users: {str(e)}")
+        st.error(f"❌ Error fetching users: {str(e)}")
         return []
 
-def update_user_profile(user_id: str, full_name: str, role: str) -> bool:
-    """Update user profile and role"""
-    supabase = init_service_client()
+def create_admin_user(supabase: Client, email: str, password: str, full_name: str = ""):
+    """Create a new admin user"""
     try:
-        # Update profiles table
-        supabase.table("profiles").upsert({
-            "id": user_id,
-            "full_name": full_name,
-            "role": role
-        }).execute()
-        
-        # Update user_roles table
-        existing_role = supabase.table("user_roles").select("*").eq("user_id", user_id).execute()
-        
-        if existing_role.data:
-            supabase.table("user_roles").update({"role": role}).eq("user_id", user_id).execute()
-        else:
-            supabase.table("user_roles").insert({"user_id": user_id, "role": role}).execute()
-        
-        # Update user metadata
-        supabase.auth.admin.update_user_by_id(user_id, {
-            "user_metadata": {
-                "full_name": full_name,
-                "role": role
-            }
-        })
-        
-        return True
-    except Exception as e:
-        st.error(f"Error updating user profile: {str(e)}")
-        return False
-
-def delete_user(user_id: str) -> bool:
-    """Delete user (soft delete by updating metadata)"""
-    supabase = init_service_client()
-    try:
-        # Note: Supabase doesn't support hard delete via admin API
-        # We'll disable the user instead
-        supabase.auth.admin.update_user_by_id(user_id, {
-            "app_metadata": {
-                "disabled": True,
-                "disabled_at": datetime.utcnow().isoformat()
-            }
-        })
-        return True
-    except Exception as e:
-        st.error(f"Error disabling user: {str(e)}")
-        return False
-
-def enable_user(user_id: str) -> bool:
-    """Enable previously disabled user"""
-    supabase = init_service_client()
-    try:
-        supabase.auth.admin.update_user_by_id(user_id, {
-            "app_metadata": {
-                "disabled": False
-            }
-        })
-        return True
-    except Exception as e:
-        st.error(f"Error enabling user: {str(e)}")
-        return False
-
-def create_admin_user(email: str, password: str, full_name: str) -> bool:
-    """Create a new admin user with service role privileges"""
-    supabase = init_service_client()
-    try:
-        # Create user with auto-confirm
-        response = supabase.auth.admin.create_user({
+        # Create user with service role (bypasses email confirmation)
+        user_response = supabase.auth.admin.create_user({
             "email": email,
             "password": password,
-            "email_confirm": True,  # Auto-confirm email
-            "user_metadata": {
-                "full_name": full_name,
-                "role": "admin"
-            }
+            "email_confirm": True
         })
         
-        if response.user:
-            user_id = response.user.id
+        if user_response.user:
+            user_id = user_response.user.id
             
-            # Insert into profiles table
+            # Create profile
             supabase.table("profiles").insert({
                 "id": user_id,
                 "full_name": full_name,
                 "role": "admin"
             }).execute()
             
-            # Insert into user_roles table
+            # Create user role entry
             supabase.table("user_roles").insert({
                 "user_id": user_id,
                 "role": "admin"
             }).execute()
             
-            return True
-    except Exception as e:
-        st.error(f"Error creating admin user: {str(e)}")
-        return False
-
-def promote_user_to_admin(email: str) -> bool:
-    """Promote existing user to admin role"""
-    supabase = init_service_client()
-    try:
-        user = get_user_by_email(email)
-        if not user:
-            st.error("User not found")
-            return False
-            
-        user_id = user.id
-        
-        # Update profiles table
-        supabase.table("profiles").update({
-            "role": "admin"
-        }).eq("id", user_id).execute()
-        
-        # Insert or update user_roles table
-        existing_role = supabase.table("user_roles").select("*").eq("user_id", user_id).execute()
-        
-        if existing_role.data:
-            # Update existing role
-            supabase.table("user_roles").update({
-                "role": "admin"
-            }).eq("user_id", user_id).execute()
+            return True, f"Admin user created successfully: {email}"
         else:
-            # Insert new role
-            supabase.table("user_roles").insert({
-                "user_id": user_id,
-                "role": "admin"
-            }).execute()
-        
-        # Update user metadata
-        supabase.auth.admin.update_user_by_id(user_id, {
-            "user_metadata": {
-                **user.user_metadata,
-                "role": "admin"
-            }
-        })
-        
-        return True
+            return False, "Failed to create user"
+            
     except Exception as e:
-        st.error(f"Error promoting user: {str(e)}")
-        return False
+        return False, f"Error creating admin user: {str(e)}"
 
-def list_admin_users():
-    """List all admin users"""
-    supabase = init_service_client()
+def promote_user_to_admin(supabase: Client, email: str):
+    """Promote existing user to admin"""
     try:
-        # Get admin users from profiles table
-        response = supabase.table("profiles").select("*").eq("role", "admin").execute()
-        return response.data
+        # Find user by email
+        users = get_all_users(supabase)
+        user = next((u for u in users if u['email'] == email), None)
+        
+        if not user:
+            return False, "User not found"
+        
+        user_id = user['id']
+        
+        # Update profile role
+        supabase.table("profiles").upsert({
+            "id": user_id,
+            "role": "admin"
+        }).execute()
+        
+        # Update user roles
+        supabase.table("user_roles").upsert({
+            "user_id": user_id,
+            "role": "admin"
+        }).execute()
+        
+        return True, f"User {email} promoted to admin successfully"
+        
     except Exception as e:
-        st.error(f"Error fetching admin users: {str(e)}")
-        return []
-
-def format_datetime(dt_string):
-    """Format datetime string for display"""
-    if not dt_string:
-        return "Never"
-    try:
-        dt = datetime.fromisoformat(dt_string.replace('Z', '+00:00'))
-        return dt.strftime("%Y-%m-%d %H:%M:%S")
-    except:
-        return dt_string
+        return False, f"Error promoting user: {str(e)}"
 
 def main():
-    st.set_page_config(page_title="Admin User Management", page_icon="👑", layout="wide")
+    st.set_page_config(
+        page_title="Admin User Management",
+        page_icon="👑",
+        layout="wide"
+    )
     
     st.title("👑 Admin User Management")
-    st.markdown("Manage admin users with service role privileges")
+    st.markdown("Manage users with service role privileges")
     
-    # Check if service role key is configured
-    if "SUPABASE_SERVICE_ROLE_KEY" not in st.secrets:
-        st.error("⚠️ SUPABASE_SERVICE_ROLE_KEY not found in secrets.toml")
-        st.code("""
-# Add this to your secrets.toml file:
-SUPABASE_SERVICE_ROLE_KEY = "your_service_role_key_here"
-        """)
-        return
+    # Initialize service client
+    supabase = init_service_client()
     
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(["Create Admin", "Promote User", "List Admins", "View All Users", "Edit User"])
+    # Sidebar for navigation
+    st.sidebar.title("Navigation")
+    tab = st.sidebar.selectbox("Choose Action", [
+        "View All Users",
+        "Create Admin User", 
+        "Promote User to Admin",
+        "User Search & Filter"
+    ])
     
-    with tab1:
-        st.header("Create New Admin User")
+    if tab == "View All Users":
+        st.header("📋 All Users")
+        
+        if st.button("🔄 Refresh Users"):
+            st.cache_resource.clear()
+        
+        users = get_all_users(supabase)
+        
+        if users:
+            df = pd.DataFrame(users)
+            st.dataframe(df, use_container_width=True)
+            
+            # Summary stats
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Total Users", len(users))
+            with col2:
+                admin_count = len([u for u in users if u['role'] == 'admin'])
+                st.metric("Admin Users", admin_count)
+            with col3:
+                confirmed_count = len([u for u in users if u['email_confirmed_at']])
+                st.metric("Confirmed Users", confirmed_count)
+        else:
+            st.warning("No users found or error fetching users")
+    
+    elif tab == "Create Admin User":
+        st.header("➕ Create New Admin User")
         
         with st.form("create_admin"):
             email = st.text_input("Email Address")
             password = st.text_input("Password", type="password")
-            full_name = st.text_input("Full Name")
+            full_name = st.text_input("Full Name (Optional)")
             
             if st.form_submit_button("Create Admin User"):
-                if email and password and full_name:
-                    if create_admin_user(email, password, full_name):
-                        st.success(f"✅ Admin user created successfully: {email}")
-                        st.rerun()
+                if email and password:
+                    success, message = create_admin_user(supabase, email, password, full_name)
+                    if success:
+                        st.success(message)
                     else:
-                        st.error("❌ Failed to create admin user")
+                        st.error(message)
                 else:
-                    st.error("Please fill in all fields")
+                    st.error("Please provide email and password")
     
-    with tab2:
-        st.header("Promote Existing User to Admin")
+    elif tab == "Promote User to Admin":
+        st.header("⬆️ Promote User to Admin")
         
-        with st.form("promote_user"):
-            email = st.text_input("User Email Address")
+        users = get_all_users(supabase)
+        non_admin_users = [u for u in users if u['role'] != 'admin']
+        
+        if non_admin_users:
+            user_options = {f"{u['email']} ({u['full_name']})" if u['full_name'] else u['email']: u['email'] 
+                          for u in non_admin_users}
             
-            if st.form_submit_button("Promote to Admin"):
-                if email:
-                    if promote_user_to_admin(email):
-                        st.success(f"✅ User promoted to admin: {email}")
-                        st.rerun()
-                    else:
-                        st.error("❌ Failed to promote user")
+            selected_user = st.selectbox("Select User to Promote", list(user_options.keys()))
+            
+            if st.button("Promote to Admin"):
+                email = user_options[selected_user]
+                success, message = promote_user_to_admin(supabase, email)
+                if success:
+                    st.success(message)
+                    st.rerun()
                 else:
-                    st.error("Please enter an email address")
-    
-    with tab3:
-        st.header("Current Admin Users")
-        
-        admin_users = list_admin_users()
-        
-        if admin_users:
-            for admin in admin_users:
-                with st.container():
-                    col1, col2 = st.columns([3, 1])
-                    with col1:
-                        st.write(f"**{admin.get('full_name', 'N/A')}**")
-                        st.write(f"ID: `{admin['id']}`")
-                    with col2:
-                        st.write("👑 Admin")
-                    st.divider()
+                    st.error(message)
         else:
-            st.info("No admin users found")
-        
-        if st.button("🔄 Refresh Admin List"):
-            st.rerun()
+            st.info("No non-admin users found")
     
-    with tab4:
-        st.header("All Users")
+    elif tab == "User Search & Filter":
+        st.header("🔍 Search & Filter Users")
         
-        # Search and filter options
-        col1, col2, col3 = st.columns([2, 1, 1])
-        with col1:
-            search_term = st.text_input("🔍 Search by email or name", placeholder="Enter email or name...")
-        with col2:
-            role_filter = st.selectbox("Filter by role", ["All", "admin", "user", "moderator"])
-        with col3:
-            status_filter = st.selectbox("Filter by status", ["All", "Active", "Disabled"])
+        users = get_all_users(supabase)
         
-        all_users = get_all_users()
-        
-        # Apply filters
-        filtered_users = all_users
-        
-        if search_term:
-            filtered_users = [u for u in filtered_users 
-                            if search_term.lower() in u['email'].lower() 
-                            or search_term.lower() in u['full_name'].lower()]
-        
-        if role_filter != "All":
-            filtered_users = [u for u in filtered_users if u['role'] == role_filter]
-        
-        if status_filter != "All":
-            if status_filter == "Active":
+        if users:
+            # Search and filter options
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                search_term = st.text_input("Search by email or name")
+            
+            with col2:
+                role_filter = st.selectbox("Filter by role", ["All", "admin", "user"])
+            
+            # Apply filters
+            filtered_users = users
+            
+            if search_term:
                 filtered_users = [u for u in filtered_users 
-                                if not u.get('app_metadata', {}).get('disabled', False)]
-            else:  # Disabled
-                filtered_users = [u for u in filtered_users 
-                                if u.get('app_metadata', {}).get('disabled', False)]
-        
-        st.write(f"**Total users: {len(filtered_users)}**")
-        
-        if filtered_users:
-            # Create a dataframe for better display
-            df_data = []
-            for user in filtered_users:
-                is_disabled = user.get('app_metadata', {}).get('disabled', False)
-                status = "🔴 Disabled" if is_disabled else "🟢 Active"
-                
-                df_data.append({
-                    'Email': user['email'],
-                    'Name': user['full_name'],
-                    'Role': f"{'👑' if user['role'] == 'admin' else '👤'} {user['role']}",
-                    'Status': status,
-                    'Created': format_datetime(user['created_at']),
-                    'Last Sign In': format_datetime(user['last_sign_in_at']),
-                    'ID': user['id'][:8] + '...'  # Shortened ID for display
-                })
+                                if search_term.lower() in u['email'].lower() 
+                                or search_term.lower() in u.get('full_name', '').lower()]
             
-            df = pd.DataFrame(df_data)
-            st.dataframe(df, use_container_width=True)
+            if role_filter != "All":
+                filtered_users = [u for u in filtered_users if u['role'] == role_filter]
             
-            # Export functionality
-            if st.button("📥 Export to CSV"):
-                csv = df.to_csv(index=False)
-                st.download_button(
-                    label="Download CSV",
-                    data=csv,
-                    file_name=f"users_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                    mime="text/csv"
-                )
-        else:
-            st.info("No users found matching the criteria")
-        
-        if st.button("🔄 Refresh User List"):
-            st.rerun()
-    
-    with tab5:
-        st.header("Edit User")
-        
-        # User selection
-        all_users = get_all_users()
-        if all_users:
-            user_options = {f"{user['email']} - {user['full_name']}": user['id'] for user in all_users}
-            selected_user_key = st.selectbox("Select user to edit", [""] + list(user_options.keys()))
+            st.write(f"Found {len(filtered_users)} users")
             
-            if selected_user_key:
-                selected_user_id = user_options[selected_user_key]
-                selected_user = next((u for u in all_users if u['id'] == selected_user_id), None)
-                
-                if selected_user:
-                    col1, col2 = st.columns(2)
-                    
-                    with col1:
-                        st.subheader("User Information")
-                        
-                        # Display current user info
-                        is_disabled = selected_user.get('app_metadata', {}).get('disabled', False)
-                        status_color = "🔴" if is_disabled else "🟢"
-                        st.write(f"**Status:** {status_color} {'Disabled' if is_disabled else 'Active'}")
-                        st.write(f"**Email:** {selected_user['email']}")
-                        st.write(f"**ID:** `{selected_user['id']}`")
-                        st.write(f"**Created:** {format_datetime(selected_user['created_at'])}")
-                        st.write(f"**Last Sign In:** {format_datetime(selected_user['last_sign_in_at'])}")
-                        
-                        # Status management
-                        st.subheader("Status Management")
-                        if is_disabled:
-                            if st.button("✅ Enable User", type="primary"):
-                                if enable_user(selected_user_id):
-                                    st.success("User enabled successfully!")
-                                    st.rerun()
-                        else:
-                            if st.button("❌ Disable User", type="secondary"):
-                                if st.session_state.get('confirm_disable'):
-                                    if delete_user(selected_user_id):
-                                        st.success("User disabled successfully!")
-                                        st.rerun()
-                                else:
-                                    st.session_state.confirm_disable = True
-                                    st.rerun()
-                            
-                            if st.session_state.get('confirm_disable'):
-                                st.warning("⚠️ Are you sure you want to disable this user?")
-                                col_a, col_b = st.columns(2)
-                                with col_a:
-                                    if st.button("Yes, Disable"):
-                                        if delete_user(selected_user_id):
-                                            st.success("User disabled successfully!")
-                                            st.session_state.confirm_disable = False
-                                            st.rerun()
-                                with col_b:
-                                    if st.button("Cancel"):
-                                        st.session_state.confirm_disable = False
-                                        st.rerun()
-                    
-                    with col2:
-                        st.subheader("Edit Profile")
-                        
-                        with st.form("edit_user"):
-                            new_full_name = st.text_input("Full Name", value=selected_user['full_name'])
-                            new_role = st.selectbox("Role", 
-                                                  options=["user", "admin", "moderator"], 
-                                                  index=["user", "admin", "moderator"].index(selected_user['role']) 
-                                                  if selected_user['role'] in ["user", "admin", "moderator"] else 0)
-                            
-                            if st.form_submit_button("💾 Update Profile"):
-                                if update_user_profile(selected_user_id, new_full_name, new_role):
-                                    st.success("User profile updated successfully!")
-                                    st.rerun()
-                                else:
-                                    st.error("Failed to update user profile")
-        else:
-            st.info("No users found")
+            if filtered_users:
+                df = pd.DataFrame(filtered_users)
+                st.dataframe(df, use_container_width=True)
+            else:
+                st.info("No users match your search criteria")
 
 if __name__ == "__main__":
     main()
