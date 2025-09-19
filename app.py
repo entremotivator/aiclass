@@ -1,6 +1,7 @@
 import streamlit as st
 from supabase import create_client, Client
 import re
+import pandas as pd
 
 # -------------------------
 # Supabase Setup
@@ -35,83 +36,60 @@ def is_strong_password(password: str) -> bool:
 def signup(email, password, role="user"):
     if not email or not password:
         return False, "⚠️ Please fill in all fields."
-    
     if not is_strong_password(password):
         return False, "⚠️ Password must be at least 12 characters and include uppercase, lowercase, number, and special character."
     
     try:
         res = supabase.auth.sign_up({"email": email, "password": password})
         if res.user:
-            try:
-                supabase.table("user_profiles").insert({
-                    "id": res.user.id,
-                    "email": email,
-                    "role": role
-                }).execute()
-            except Exception as profile_error:
-                return False, f"Account created but profile setup failed: {str(profile_error)}"
-            
+            supabase.table("user_profiles").insert({
+                "id": res.user.id,
+                "email": email,
+                "role": role
+            }).execute()
             return True, "✅ Account created! Please check your email to verify your account, then log in."
-        else:
-            return False, "❌ Failed to create account. Please try again."
+        return False, "❌ Failed to create account."
     except Exception as e:
         error_msg = str(e)
         if "already registered" in error_msg.lower():
-            return False, "⚠️ This email is already registered. Try logging in instead."
+            return False, "⚠️ Email already registered. Try logging in."
         return False, f"❌ Signup error: {error_msg}"
 
 # -------------------------
 # Login Function
 # -------------------------
 def login(email, password):
-    if not email or not password:
-        return False, "⚠️ Please fill in all fields."
-    
     try:
         res = supabase.auth.sign_in_with_password({"email": email, "password": password})
         if res.user:
-            try:
-                profile = supabase.table("user_profiles").select("role").eq("id", res.user.id).execute()
-                role = profile.data[0]["role"] if profile.data else "user"
-            except Exception:
-                role = "user"  # Default role if profile lookup fails
-            
+            profile = supabase.table("user_profiles").select("role").eq("id", res.user.id).execute()
+            role = profile.data[0]["role"] if profile.data else "user"
             st.session_state.authenticated = True
             st.session_state.user = res.user
             st.session_state.role = role
-            return True, f"✅ Welcome back! Logged in as {role.capitalize()}"
-        else:
-            return False, "❌ Login failed. Please check your credentials."
+            return True, f"✅ Logged in as {role.capitalize()}"
+        return False, "❌ Invalid login."
     except Exception as e:
-        error_msg = str(e)
-        if "invalid login credentials" in error_msg.lower():
-            return False, "❌ Invalid email or password. Please try again."
-        elif "email not confirmed" in error_msg.lower():
-            return False, "⚠️ Please check your email and confirm your account first."
-        return False, f"❌ Login error: {error_msg}"
+        return False, f"❌ Login error: {str(e)}"
 
 # -------------------------
-# Password Reset
+# Reset Password
 # -------------------------
 def reset_password(email):
-    if not email:
-        return False, "⚠️ Please enter your email address."
-    
     try:
         supabase.auth.reset_password_for_email(email)
-        return True, f"✅ Password reset email sent to {email}. Please check your inbox."
+        return True, f"✅ Password reset email sent to {email}"
     except Exception as e:
         return False, f"❌ Reset error: {str(e)}"
 
 # -------------------------
-# Logout Function
+# Logout
 # -------------------------
 def logout():
     try:
         supabase.auth.sign_out()
     except Exception:
-        pass  # Continue with logout even if API call fails
-    
+        pass
     st.session_state.authenticated = False
     st.session_state.role = None
     st.session_state.user = None
@@ -123,48 +101,78 @@ def logout():
 def admin_dashboard():
     st.title("👑 Admin Dashboard")
     
-    col1, col2 = st.columns(2)
-    
     try:
         users = supabase.table("user_profiles").select("*").execute()
-        total_users = len(users.data) if users.data else 0
-        admin_count = len([u for u in users.data if u.get('role') == 'admin']) if users.data else 0
-        
-        with col1:
-            st.metric("Total Users", total_users)
-        with col2:
-            st.metric("Admins", admin_count)
-        
+        auth_users = supabase.auth.admin.list_users()  # requires service role
+
+        # Merge auth info + profiles
+        user_data = []
+        for profile in users.data or []:
+            auth_info = next((u for u in auth_users.user if u.id == profile["id"]), None)
+            user_data.append({
+                "id": profile["id"],
+                "email": profile["email"],
+                "role": profile["role"],
+                "created_at": getattr(auth_info, "created_at", None),
+                "last_sign_in": getattr(auth_info, "last_sign_in_at", None),
+                "confirmed": getattr(auth_info, "email_confirmed", False),
+            })
+
+        total_users = len(user_data)
+        admin_count = len([u for u in user_data if u["role"] == "admin"])
+        unconfirmed = len([u for u in user_data if not u["confirmed"]])
+
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Total Users", total_users)
+        col2.metric("Admins", admin_count)
+        col3.metric("Unconfirmed", unconfirmed)
+
         st.subheader("📋 User Management")
-        
-        if users.data:
-            for i, user in enumerate(users.data):
+        search = st.text_input("🔍 Search by email")
+        filtered = [u for u in user_data if search.lower() in u["email"].lower()] if search else user_data
+
+        if st.button("⬇️ Export CSV"):
+            df = pd.DataFrame(filtered)
+            st.download_button("Download Users CSV", df.to_csv(index=False), "users.csv", "text/csv")
+
+        if filtered:
+            for i, user in enumerate(filtered):
                 with st.expander(f"👤 {user['email']} ({user['role'].title()})"):
                     st.write(f"**User ID:** {user['id']}")
-                    st.write(f"**Email:** {user['email']}")
-                    st.write(f"**Role:** {user['role'].title()}")
-                    
-                    # Role update functionality
-                    new_role = st.selectbox(
-                        "Change Role:", 
-                        ["user", "admin"], 
-                        index=0 if user['role'] == 'user' else 1,
-                        key=f"role_{i}"
-                    )
-                    
-                    if st.button(f"Update Role", key=f"update_{i}"):
+                    st.write(f"**Created At:** {user['created_at']}")
+                    st.write(f"**Last Sign In:** {user['last_sign_in']}")
+                    st.write(f"**Confirmed:** {user['confirmed']}")
+
+                    # Update role
+                    new_role = st.selectbox("Change Role", ["user", "admin"], 
+                                            index=0 if user["role"] == "user" else 1,
+                                            key=f"role_{i}")
+                    if st.button("Update Role", key=f"update_{i}"):
+                        supabase.table("user_profiles").update({"role": new_role}).eq("id", user["id"]).execute()
+                        st.success(f"Updated {user['email']} to {new_role}")
+                        st.rerun()
+
+                    # Reset password
+                    if st.button("Reset Password", key=f"reset_{i}"):
+                        reset_password(user["email"])
+                        st.success(f"Password reset email sent to {user['email']}")
+
+                    # Delete user
+                    if st.button("❌ Delete User", key=f"delete_{i}"):
                         try:
-                            supabase.table("user_profiles").update({"role": new_role}).eq("id", user['id']).execute()
-                            st.success(f"✅ Updated {user['email']} to {new_role}")
+                            supabase.table("user_profiles").delete().eq("id", user["id"]).execute()
+                            supabase.auth.admin.delete_user(user["id"])
+                            st.warning(f"Deleted {user['email']}")
                             st.rerun()
                         except Exception as e:
-                            st.error(f"❌ Failed to update role: {str(e)}")
+                            st.error(f"Failed to delete: {e}")
+
         else:
-            st.info("No users found in the database.")
-            
+            st.info("No users found.")
+
     except Exception as e:
-        st.error(f"❌ Error loading users: {str(e)}")
-    
+        st.error(f"Error loading users: {e}")
+
     st.divider()
     if st.button("🚪 Logout", type="primary"):
         logout()
@@ -174,33 +182,14 @@ def admin_dashboard():
 # -------------------------
 def user_dashboard():
     st.title("🙋 User Dashboard")
-    
     user_email = st.session_state.user.email if st.session_state.user else "Unknown"
-    st.write(f"**Welcome back, {user_email}!** 👋")
-    
-    # User info card
-    with st.container():
-        st.subheader("📊 Your Account")
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.info(f"**Email:** {user_email}")
-        with col2:
-            st.info(f"**Role:** {st.session_state.role.title()}")
-    
-    st.subheader("🚀 Quick Actions")
-    st.write("This is where you can add user-specific features and functionality.")
-    
-    # Example user actions
-    if st.button("🔄 Refresh Profile"):
-        st.success("Profile refreshed!")
-    
-    st.divider()
+    st.write(f"Welcome, **{user_email}** 👋")
+    st.info(f"Role: {st.session_state.role.title()}")
     if st.button("🚪 Logout", type="primary"):
         logout()
 
 # -------------------------
-# Redirect Logged-in Users
+# Redirect
 # -------------------------
 def redirect_dashboard():
     if st.session_state.role == "admin":
@@ -209,81 +198,45 @@ def redirect_dashboard():
         user_dashboard()
 
 # -------------------------
-# Main App UI
+# Main App
 # -------------------------
 def main():
-    st.set_page_config(
-        page_title="Supabase Auth App",
-        page_icon="🔐",
-        layout="wide"
-    )
-    
+    st.set_page_config(page_title="Supabase Auth App", page_icon="🔐", layout="wide")
+
     if not st.session_state.authenticated:
         st.title("🔐 Supabase Authentication")
-        st.write("Welcome! Please login or create an account to continue.")
 
         tab1, tab2, tab3 = st.tabs(["🔑 Login", "📝 Sign Up", "🔄 Reset Password"])
 
-        # ----- LOGIN -----
         with tab1:
-            st.subheader("Login to Your Account")
-            
             with st.form("login_form"):
-                login_email = st.text_input("📧 Email", placeholder="Enter your email")
-                login_password = st.text_input("🔒 Password", type="password", placeholder="Enter your password")
-                login_submitted = st.form_submit_button("🔑 Login", type="primary")
-                
-                if login_submitted:
-                    with st.spinner("Logging in..."):
-                        success, msg = login(login_email, login_password)
-                        if success:
-                            st.success(msg)
-                            st.rerun()
-                        else:
-                            st.error(msg)
+                email = st.text_input("📧 Email")
+                password = st.text_input("🔒 Password", type="password")
+                if st.form_submit_button("Login", type="primary"):
+                    success, msg = login(email, password)
+                    st.success(msg) if success else st.error(msg)
+                    if success: st.rerun()
 
-        # ----- SIGNUP -----
         with tab2:
-            st.subheader("Create New Account")
-            
             with st.form("signup_form"):
-                signup_email = st.text_input("📧 Email", placeholder="Enter your email")
-                signup_password = st.text_input("🔒 Password", type="password", placeholder="Create a strong password")
-                
-                st.caption("Password must be at least 12 characters with uppercase, lowercase, number, and special character.")
-                
-                role = st.selectbox("👤 Role", ["user", "admin"], help="Select your account type")
-                signup_submitted = st.form_submit_button("📝 Create Account", type="primary")
-                
-                if signup_submitted:
-                    with st.spinner("Creating account..."):
-                        success, msg = signup(signup_email, signup_password, role)
-                        if success:
-                            st.success(msg)
-                        else:
-                            st.error(msg)
+                email = st.text_input("📧 Email")
+                password = st.text_input("🔒 Password", type="password")
+                role = st.selectbox("👤 Role", ["user", "admin"])
+                if st.form_submit_button("Sign Up", type="primary"):
+                    success, msg = signup(email, password, role)
+                    st.success(msg) if success else st.error(msg)
 
-        # ----- RESET PASSWORD -----
         with tab3:
-            st.subheader("Reset Your Password")
-            
             with st.form("reset_form"):
-                reset_email = st.text_input("📧 Email", placeholder="Enter your registered email")
-                reset_submitted = st.form_submit_button("📧 Send Reset Email", type="primary")
-                
-                if reset_submitted:
-                    with st.spinner("Sending reset email..."):
-                        success, msg = reset_password(reset_email)
-                        if success:
-                            st.success(msg)
-                        else:
-                            st.error(msg)
-
+                email = st.text_input("📧 Email")
+                if st.form_submit_button("Send Reset", type="primary"):
+                    success, msg = reset_password(email)
+                    st.success(msg) if success else st.error(msg)
     else:
         redirect_dashboard()
 
 # -------------------------
-# Run the App
+# Run
 # -------------------------
 if __name__ == "__main__":
     main()
