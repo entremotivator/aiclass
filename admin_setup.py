@@ -1,177 +1,193 @@
 import streamlit as st
 from supabase import create_client, Client
 import os
-from datetime import datetime
-import pandas as pd
+from typing import Optional
 
 # Initialize Supabase client with service role key
+@st.cache_resource
 def init_service_client():
-    """Initialize Supabase client with service role key for admin operations"""
     url = st.secrets["SUPABASE_URL"]
-    service_key = st.secrets["SUPABASE_SERVICE_ROLE_KEY"]  # Service role key bypasses RLS
+    service_key = st.secrets["SUPABASE_SERVICE_ROLE_KEY"]
     return create_client(url, service_key)
 
-def create_admin_user(email: str, password: str, full_name: str = None):
-    """Create an admin user with elevated privileges"""
+def get_user_by_email(email: str) -> Optional[dict]:
+    """Get user by email using service role client"""
     supabase = init_service_client()
-    
     try:
-        # Create user with service role (bypasses email confirmation)
-        auth_response = supabase.auth.admin.create_user({
+        # Get user from auth.users
+        response = supabase.auth.admin.list_users()
+        users = response.data.users if hasattr(response.data, 'users') else []
+        
+        for user in users:
+            if user.email == email:
+                return user
+        return None
+    except Exception as e:
+        st.error(f"Error fetching user: {str(e)}")
+        return None
+
+def create_admin_user(email: str, password: str, full_name: str) -> bool:
+    """Create a new admin user with service role privileges"""
+    supabase = init_service_client()
+    try:
+        # Create user with auto-confirm
+        response = supabase.auth.admin.create_user({
             "email": email,
             "password": password,
             "email_confirm": True,  # Auto-confirm email
             "user_metadata": {
-                "full_name": full_name or email.split("@")[0],
-                "role": "admin",
-                "created_by": "system_admin"
-            }
-        })
-        
-        if auth_response.user:
-            user_id = auth_response.user.id
-            
-            # Insert user profile with admin role
-            profile_data = {
-                "id": user_id,
-                "email": email,
-                "full_name": full_name or email.split("@")[0],
-                "role": "admin",
-                "created_at": datetime.now().isoformat(),
-                "is_active": True
-            }
-            
-            # Insert into profiles table
-            supabase.table("profiles").insert(profile_data).execute()
-            
-            return True, f"Admin user {email} created successfully"
-        else:
-            return False, "Failed to create user"
-            
-    except Exception as e:
-        return False, f"Error creating admin user: {str(e)}"
-
-def promote_user_to_admin(email: str):
-    """Promote an existing user to admin role"""
-    supabase = init_service_client()
-    
-    try:
-        # Find user by email
-        user_response = supabase.table("profiles").select("*").eq("email", email).execute()
-        
-        if not user_response.data:
-            return False, f"User {email} not found"
-        
-        user = user_response.data[0]
-        user_id = user["id"]
-        
-        # Update user role to admin
-        supabase.table("profiles").update({
-            "role": "admin",
-            "updated_at": datetime.now().isoformat()
-        }).eq("id", user_id).execute()
-        
-        # Update user metadata
-        supabase.auth.admin.update_user_by_id(user_id, {
-            "user_metadata": {
-                **user.get("user_metadata", {}),
+                "full_name": full_name,
                 "role": "admin"
             }
         })
         
-        return True, f"User {email} promoted to admin successfully"
-        
+        if response.user:
+            user_id = response.user.id
+            
+            # Insert into profiles table
+            supabase.table("profiles").insert({
+                "id": user_id,
+                "full_name": full_name,
+                "role": "admin"
+            }).execute()
+            
+            # Insert into user_roles table
+            supabase.table("user_roles").insert({
+                "user_id": user_id,
+                "role": "admin"
+            }).execute()
+            
+            return True
     except Exception as e:
-        return False, f"Error promoting user: {str(e)}"
+        st.error(f"Error creating admin user: {str(e)}")
+        return False
 
-def list_all_users():
-    """List all users with their roles"""
+def promote_user_to_admin(email: str) -> bool:
+    """Promote existing user to admin role"""
     supabase = init_service_client()
-    
     try:
-        response = supabase.table("profiles").select("*").execute()
+        user = get_user_by_email(email)
+        if not user:
+            st.error("User not found")
+            return False
+            
+        user_id = user.id
+        
+        # Update profiles table
+        supabase.table("profiles").update({
+            "role": "admin"
+        }).eq("id", user_id).execute()
+        
+        # Insert or update user_roles table
+        existing_role = supabase.table("user_roles").select("*").eq("user_id", user_id).execute()
+        
+        if existing_role.data:
+            # Update existing role
+            supabase.table("user_roles").update({
+                "role": "admin"
+            }).eq("user_id", user_id).execute()
+        else:
+            # Insert new role
+            supabase.table("user_roles").insert({
+                "user_id": user_id,
+                "role": "admin"
+            }).execute()
+        
+        # Update user metadata
+        supabase.auth.admin.update_user_by_id(user_id, {
+            "user_metadata": {
+                **user.user_metadata,
+                "role": "admin"
+            }
+        })
+        
+        return True
+    except Exception as e:
+        st.error(f"Error promoting user: {str(e)}")
+        return False
+
+def list_admin_users():
+    """List all admin users"""
+    supabase = init_service_client()
+    try:
+        # Get admin users from profiles table
+        response = supabase.table("profiles").select("*").eq("role", "admin").execute()
         return response.data
     except Exception as e:
-        st.error(f"Error fetching users: {str(e)}")
+        st.error(f"Error fetching admin users: {str(e)}")
         return []
 
 def main():
     st.set_page_config(page_title="Admin User Management", page_icon="👑")
     
     st.title("👑 Admin User Management")
-    st.markdown("---")
+    st.markdown("Manage admin users with service role privileges")
     
     # Check if service role key is configured
     if "SUPABASE_SERVICE_ROLE_KEY" not in st.secrets:
         st.error("⚠️ SUPABASE_SERVICE_ROLE_KEY not found in secrets.toml")
-        st.info("Add your Supabase service role key to secrets.toml to use admin functions")
+        st.code("""
+# Add this to your secrets.toml file:
+SUPABASE_SERVICE_ROLE_KEY = "your_service_role_key_here"
+        """)
         return
     
-    tab1, tab2, tab3 = st.tabs(["Create Admin", "Promote User", "User List"])
+    tab1, tab2, tab3 = st.tabs(["Create Admin", "Promote User", "List Admins"])
     
     with tab1:
         st.header("Create New Admin User")
         
         with st.form("create_admin"):
-            email = st.text_input("Email Address", placeholder="admin@example.com")
-            password = st.text_input("Password", type="password", placeholder="Strong password")
-            full_name = st.text_input("Full Name (Optional)", placeholder="Admin User")
+            email = st.text_input("Email Address")
+            password = st.text_input("Password", type="password")
+            full_name = st.text_input("Full Name")
             
-            if st.form_submit_button("Create Admin User", type="primary"):
-                if email and password:
-                    success, message = create_admin_user(email, password, full_name)
-                    if success:
-                        st.success(message)
+            if st.form_submit_button("Create Admin User"):
+                if email and password and full_name:
+                    if create_admin_user(email, password, full_name):
+                        st.success(f"✅ Admin user created successfully: {email}")
+                        st.rerun()
                     else:
-                        st.error(message)
+                        st.error("❌ Failed to create admin user")
                 else:
-                    st.error("Please provide both email and password")
+                    st.error("Please fill in all fields")
     
     with tab2:
         st.header("Promote Existing User to Admin")
         
         with st.form("promote_user"):
-            email = st.text_input("User Email", placeholder="user@example.com")
+            email = st.text_input("User Email Address")
             
-            if st.form_submit_button("Promote to Admin", type="primary"):
+            if st.form_submit_button("Promote to Admin"):
                 if email:
-                    success, message = promote_user_to_admin(email)
-                    if success:
-                        st.success(message)
+                    if promote_user_to_admin(email):
+                        st.success(f"✅ User promoted to admin: {email}")
+                        st.rerun()
                     else:
-                        st.error(message)
+                        st.error("❌ Failed to promote user")
                 else:
-                    st.error("Please provide user email")
+                    st.error("Please enter an email address")
     
     with tab3:
-        st.header("All Users")
+        st.header("Current Admin Users")
         
-        if st.button("Refresh User List"):
-            st.rerun()
+        admin_users = list_admin_users()
         
-        users = list_all_users()
-        
-        if users:
-            df = pd.DataFrame(users)
-            
-            # Display user statistics
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric("Total Users", len(users))
-            with col2:
-                admin_count = len([u for u in users if u.get("role") == "admin"])
-                st.metric("Admin Users", admin_count)
-            with col3:
-                active_count = len([u for u in users if u.get("is_active", True)])
-                st.metric("Active Users", active_count)
-            
-            # Display users table
-            st.dataframe(
-                df[["email", "full_name", "role", "created_at", "is_active"]],
-                use_container_width=True
-            )
+        if admin_users:
+            for admin in admin_users:
+                with st.container():
+                    col1, col2 = st.columns([3, 1])
+                    with col1:
+                        st.write(f"**{admin.get('full_name', 'N/A')}**")
+                        st.write(f"ID: `{admin['id']}`")
+                    with col2:
+                        st.write("👑 Admin")
+                    st.divider()
         else:
-            st.info("No users found")
+            st.info("No admin users found")
+        
+        if st.button("🔄 Refresh List"):
+            st.rerun()
 
 if __name__ == "__main__":
     main()
