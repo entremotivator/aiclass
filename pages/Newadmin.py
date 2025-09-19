@@ -164,6 +164,7 @@ def init_service_client():
             st.stop()
         
         client = create_client(url, service_key)
+        # Test connection with a simple query
         test_response = client.table("profiles").select("id").limit(1).execute()
         
         return client
@@ -175,17 +176,22 @@ def init_service_client():
 def get_all_users(supabase: Client) -> List[Dict]:
     """Get all users with profiles, roles, and additional metadata"""
     try:
-        # Get auth users
+        # Get auth users with better error handling
         auth_response = supabase.auth.admin.list_users()
         
+        # Handle different response formats from Supabase
+        auth_users = []
         if hasattr(auth_response, 'data') and hasattr(auth_response.data, 'users'):
             auth_users = auth_response.data.users
+        elif hasattr(auth_response, 'users'):
+            auth_users = auth_response.users
         elif isinstance(auth_response, list):
             auth_users = auth_response
         else:
-            auth_users = []
+            st.warning("Unexpected auth response format. Please check your Supabase configuration.")
+            return []
         
-        # Get profiles
+        # Get profiles from the actual profiles table
         profiles_response = supabase.table("profiles").select("*").execute()
         profiles = {p['id']: p for p in profiles_response.data} if profiles_response.data else {}
         
@@ -193,45 +199,78 @@ def get_all_users(supabase: Client) -> List[Dict]:
         roles_response = supabase.table("user_roles").select("*").execute()
         user_roles = {r['user_id']: r['role'] for r in roles_response.data} if roles_response.data else {}
         
-        # Get pending approvals
-        try:
-            approvals_response = supabase.table("user_approvals").select("*").execute()
-            pending_approvals = {a['user_id']: a for a in approvals_response.data} if approvals_response.data else {}
-        except:
-            pending_approvals = {}
+        # Get user profiles (additional table)
+        user_profiles_response = supabase.table("user_profiles").select("*").execute()
+        user_profiles = {up['user_id']: up for up in user_profiles_response.data} if user_profiles_response.data else {}
         
-        # Combine data
+        # Get pending signups for approval workflow
+        try:
+            pending_signups_response = supabase.table("pending_signups").select("*").execute()
+            pending_signups = {ps['email']: ps for ps in pending_signups_response.data} if pending_signups_response.data else {}
+        except:
+            pending_signups = {}
+        
+        # Get users table data for additional info
+        try:
+            users_table_response = supabase.table("users").select("*").execute()
+            users_table = {u['id']: u for u in users_table_response.data} if users_table_response.data else {}
+        except:
+            users_table = {}
+        
+        # Combine data with safer attribute access
         users = []
         for user in auth_users:
-            profile = profiles.get(user.id, {})
-            role = user_roles.get(user.id, profile.get('role', 'user'))
-            approval = pending_approvals.get(user.id, {})
-            
-            # Calculate user activity score
-            last_sign_in = user.last_sign_in_at
-            activity_score = calculate_activity_score(last_sign_in)
-            
-            users.append({
-                'id': user.id,
-                'email': user.email,
-                'created_at': user.created_at,
-                'email_confirmed_at': user.email_confirmed_at,
-                'last_sign_in_at': last_sign_in,
-                'role': role,
-                'full_name': profile.get('full_name', ''),
-                'avatar_url': profile.get('avatar_url', ''),
-                'updated_at': profile.get('updated_at', ''),
-                'phone': profile.get('phone', ''),
-                'bio': profile.get('bio', ''),
-                'location': profile.get('location', ''),
-                'website': profile.get('website', ''),
-                'activity_score': activity_score,
-                'pending_approval': approval.get('status') == 'pending',
-                'approval_type': approval.get('approval_type', ''),
-                'approval_reason': approval.get('reason', ''),
-                'is_active': not user.banned_until,
-                'metadata': user.user_metadata or {}
-            })
+            try:
+                # Safely get user attributes
+                user_id = getattr(user, 'id', '')
+                user_email = getattr(user, 'email', '')
+                user_created_at = getattr(user, 'created_at', '')
+                user_email_confirmed_at = getattr(user, 'email_confirmed_at', None)
+                user_last_sign_in_at = getattr(user, 'last_sign_in_at', None)
+                user_banned_until = getattr(user, 'banned_until', None)
+                user_metadata = getattr(user, 'user_metadata', {}) or {}
+                
+                if not user_id or not user_email:
+                    continue  # Skip invalid user records
+                
+                # Get data from various tables
+                profile = profiles.get(user_id, {})
+                user_profile = user_profiles.get(user_id, {})
+                user_table_data = users_table.get(user_id, {})
+                role = user_roles.get(user_id, profile.get('role', user_profile.get('role', 'user')))
+                pending_signup = pending_signups.get(user_email, {})
+                
+                # Calculate user activity score
+                activity_score = calculate_activity_score(user_last_sign_in_at)
+                
+                # Determine if user is pending approval
+                is_pending = pending_signup.get('status') == 'pending' or user_profile.get('status') == 'pending'
+                
+                users.append({
+                    'id': user_id,
+                    'email': user_email,
+                    'created_at': user_created_at,
+                    'email_confirmed_at': user_email_confirmed_at,
+                    'last_sign_in_at': user_last_sign_in_at,
+                    'role': role,
+                    'full_name': profile.get('full_name', user_profile.get('full_name', '')),
+                    'avatar_url': profile.get('avatar_url', ''),
+                    'website': profile.get('website', ''),
+                    'username': profile.get('username', ''),
+                    'updated_at': profile.get('updated_at', user_profile.get('created_at', '')),
+                    'activity_score': activity_score,
+                    'pending_approval': is_pending,
+                    'approval_status': pending_signup.get('status', user_profile.get('status', 'approved')),
+                    'is_active': not user_banned_until and user_table_data.get('is_active', True),
+                    'metadata': user_metadata,
+                    'subscription_tier': user_table_data.get('subscription_tier', 'free'),
+                    'tokens_used': user_table_data.get('tokens_used_this_month', 0),
+                    'total_cost': float(user_table_data.get('total_cost', 0)),
+                    'last_login': user_table_data.get('last_login', user_last_sign_in_at)
+                })
+            except Exception as user_error:
+                st.warning(f"Skipping user due to error: {str(user_error)}")
+                continue
         
         return users
         
@@ -279,16 +318,19 @@ def render_user_card(user: Dict, key_suffix: str = ""):
         
         with col1:
             # User basic info
-            st.markdown(f"**👤 {user['full_name'] or 'No Name'}**")
+            display_name = user['full_name'] or user['username'] or 'No Name'
+            st.markdown(f"**👤 {display_name}**")
             st.markdown(f"📧 {user['email']}")
-            if user['phone']:
-                st.markdown(f"📱 {user['phone']}")
-            if user['location']:
-                st.markdown(f"📍 {user['location']}")
+            if user['website']:
+                st.markdown(f"🌐 [Website]({user['website']})")
+            
+            # Subscription info
+            tier_emoji = {"free": "🆓", "pro": "⭐", "enterprise": "💎"}.get(user['subscription_tier'], "🆓")
+            st.markdown(f"{tier_emoji} {user['subscription_tier'].title()}")
         
         with col2:
             # Role and status
-            role_emoji = "👑" if user['role'] == 'admin' else "👤"
+            role_emoji = "👑" if user['role'] == 'admin' else "🛡️" if user['role'] == 'moderator' else "👤"
             st.markdown(f"{role_emoji} **{user['role'].title()}**")
             
             status_emoji = "✅" if user['is_active'] else "❌"
@@ -301,13 +343,16 @@ def render_user_card(user: Dict, key_suffix: str = ""):
                 st.markdown("⚠️ Email Unverified")
         
         with col3:
-            # Activity and dates
+            # Activity and usage
             st.markdown(f"🕒 **Last Active:** {user['activity_score']}")
             created_date = datetime.fromisoformat(user['created_at'].replace('Z', '+00:00')).strftime('%Y-%m-%d')
             st.markdown(f"📅 **Joined:** {created_date}")
             
+            if user['tokens_used'] > 0:
+                st.markdown(f"🎯 **Tokens Used:** {user['tokens_used']:,}")
+            
             if user['pending_approval']:
-                st.markdown(f"⏳ **Pending:** {user['approval_type']}")
+                st.markdown(f"⏳ **Status:** {user['approval_status']}")
         
         with col4:
             # Action buttons
@@ -315,11 +360,11 @@ def render_user_card(user: Dict, key_suffix: str = ""):
                 col4a, col4b = st.columns(2)
                 with col4a:
                     if st.button("✅ Approve", key=f"approve_{user['id']}_{key_suffix}", help="Approve pending request"):
-                        approve_user_request(user['id'], user['approval_type'])
+                        approve_user_request(user['id'], user['email'])
                         st.rerun()
                 with col4b:
                     if st.button("❌ Reject", key=f"reject_{user['id']}_{key_suffix}", help="Reject pending request"):
-                        reject_user_request(user['id'], user['approval_type'])
+                        reject_user_request(user['id'], user['email'])
                         st.rerun()
             else:
                 if st.button("✏️ Edit", key=f"edit_{user['id']}_{key_suffix}", help="Edit user details"):
@@ -333,24 +378,32 @@ def render_user_card(user: Dict, key_suffix: str = ""):
             with detail_col1:
                 st.markdown("**Profile Information:**")
                 st.write(f"• **User ID:** {user['id']}")
-                st.write(f"• **Bio:** {user['bio'] or 'No bio provided'}")
-                st.write(f"• **Website:** {user['website'] or 'No website'}")
+                st.write(f"• **Username:** {user['username'] or 'Not set'}")
+                st.write(f"• **Subscription:** {user['subscription_tier'].title()}")
                 if user['avatar_url']:
                     st.write(f"• **Avatar:** [View]({user['avatar_url']})")
+                st.write(f"• **Total Cost:** ${user['total_cost']:.4f}")
             
             with detail_col2:
                 st.markdown("**Account Information:**")
                 if user['updated_at']:
-                    updated_date = datetime.fromisoformat(user['updated_at'].replace('Z', '+00:00')).strftime('%Y-%m-%d %H:%M')
-                    st.write(f"• **Last Updated:** {updated_date}")
+                    try:
+                        updated_date = datetime.fromisoformat(user['updated_at'].replace('Z', '+00:00')).strftime('%Y-%m-%d %H:%M')
+                        st.write(f"• **Last Updated:** {updated_date}")
+                    except:
+                        st.write(f"• **Last Updated:** {user['updated_at']}")
                 
                 if user['metadata']:
                     st.write("• **Metadata:**")
                     for key, value in user['metadata'].items():
                         st.write(f"  - {key}: {value}")
                 
-                if user['pending_approval'] and user['approval_reason']:
-                    st.write(f"• **Approval Reason:** {user['approval_reason']}")
+                if user['last_login'] and user['last_login'] != user['last_sign_in_at']:
+                    try:
+                        login_date = datetime.fromisoformat(user['last_login'].replace('Z', '+00:00')).strftime('%Y-%m-%d %H:%M')
+                        st.write(f"• **Last Login:** {login_date}")
+                    except:
+                        st.write(f"• **Last Login:** {user['last_login']}")
         
         st.markdown('</div>', unsafe_allow_html=True)
 
@@ -364,6 +417,10 @@ def render_stats_dashboard(users: List[Dict]):
     active_users = len([u for u in users if u['is_active']])
     verified_users = len([u for u in users if u['email_confirmed_at']])
     pending_approvals = len([u for u in users if u['pending_approval']])
+    
+    # Subscription stats
+    pro_users = len([u for u in users if u['subscription_tier'] == 'pro'])
+    enterprise_users = len([u for u in users if u['subscription_tier'] == 'enterprise'])
     
     # Recent activity (last 7 days)
     recent_active = len([u for u in users if u['activity_score'] in ['Today', 'Yesterday'] or 'days ago' in u['activity_score']])
@@ -419,6 +476,44 @@ def render_stats_dashboard(users: List[Dict]):
         </div>
         """, unsafe_allow_html=True)
     
+    # Additional stats row
+    st.markdown("### 💰 Subscription Analytics")
+    col7, col8, col9, col10 = st.columns(4)
+    
+    with col7:
+        free_users = total_users - pro_users - enterprise_users
+        st.markdown(f"""
+        <div class="stats-card">
+            <div class="metric-value">{free_users}</div>
+            <div class="metric-label">Free Users</div>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    with col8:
+        st.markdown(f"""
+        <div class="stats-card">
+            <div class="metric-value">{pro_users}</div>
+            <div class="metric-label">Pro Users</div>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    with col9:
+        st.markdown(f"""
+        <div class="stats-card">
+            <div class="metric-value">{enterprise_users}</div>
+            <div class="metric-label">Enterprise</div>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    with col10:
+        total_revenue = sum([u['total_cost'] for u in users])
+        st.markdown(f"""
+        <div class="stats-card">
+            <div class="metric-value">${total_revenue:.0f}</div>
+            <div class="metric-label">Total Revenue</div>
+        </div>
+        """, unsafe_allow_html=True)
+    
     # Charts
     if users:
         chart_col1, chart_col2 = st.columns(2)
@@ -444,35 +539,27 @@ def render_stats_dashboard(users: List[Dict]):
             st.plotly_chart(fig_roles, use_container_width=True)
         
         with chart_col2:
-            # Registration timeline
-            registration_dates = []
+            # Subscription tier distribution
+            tier_counts = {}
             for user in users:
-                try:
-                    date = datetime.fromisoformat(user['created_at'].replace('Z', '+00:00')).date()
-                    registration_dates.append(date)
-                except:
-                    continue
+                tier = user['subscription_tier']
+                tier_counts[tier] = tier_counts.get(tier, 0) + 1
             
-            if registration_dates:
-                df_reg = pd.DataFrame({'date': registration_dates})
-                df_reg['count'] = 1
-                df_reg_grouped = df_reg.groupby('date').count().reset_index()
-                
-                fig_timeline = px.line(
-                    df_reg_grouped,
-                    x='date',
-                    y='count',
-                    title="User Registration Timeline",
-                    color_discrete_sequence=['#2196f3']
-                )
-                fig_timeline.update_layout(
-                    plot_bgcolor='rgba(0,0,0,0)',
-                    paper_bgcolor='rgba(0,0,0,0)',
-                    font=dict(color='#333'),
-                    xaxis_title="Date",
-                    yaxis_title="New Users"
-                )
-                st.plotly_chart(fig_timeline, use_container_width=True)
+            fig_tiers = px.bar(
+                x=list(tier_counts.keys()),
+                y=list(tier_counts.values()),
+                title="Subscription Tier Distribution",
+                color=list(tier_counts.keys()),
+                color_discrete_sequence=['#2196f3', '#ff9800', '#4caf50']
+            )
+            fig_tiers.update_layout(
+                plot_bgcolor='rgba(0,0,0,0)',
+                paper_bgcolor='rgba(0,0,0,0)',
+                font=dict(color='#333'),
+                xaxis_title="Subscription Tier",
+                yaxis_title="Number of Users"
+            )
+            st.plotly_chart(fig_tiers, use_container_width=True)
 
 def render_user_editor(user: Dict, supabase: Client):
     """Render user editing form"""
@@ -485,15 +572,14 @@ def render_user_editor(user: Dict, supabase: Client):
             st.markdown("**Basic Information**")
             new_email = st.text_input("Email", value=user['email'])
             new_full_name = st.text_input("Full Name", value=user['full_name'])
-            new_phone = st.text_input("Phone", value=user['phone'])
-            new_location = st.text_input("Location", value=user['location'])
+            new_username = st.text_input("Username", value=user['username'])
             new_website = st.text_input("Website", value=user['website'])
+            new_avatar_url = st.text_input("Avatar URL", value=user['avatar_url'])
         
         with col2:
-            st.markdown("**Profile & Settings**")
-            new_bio = st.text_area("Bio", value=user['bio'], height=100)
-            new_avatar_url = st.text_input("Avatar URL", value=user['avatar_url'])
+            st.markdown("**Settings & Permissions**")
             new_role = st.selectbox("Role", options=['user', 'admin', 'moderator'], index=['user', 'admin', 'moderator'].index(user['role']) if user['role'] in ['user', 'admin', 'moderator'] else 0)
+            new_subscription_tier = st.selectbox("Subscription Tier", options=['free', 'pro', 'enterprise'], index=['free', 'pro', 'enterprise'].index(user['subscription_tier']) if user['subscription_tier'] in ['free', 'pro', 'enterprise'] else 0)
             new_active = st.checkbox("Account Active", value=user['is_active'])
             new_verified = st.checkbox("Email Verified", value=bool(user['email_confirmed_at']))
         
@@ -514,8 +600,8 @@ def render_user_editor(user: Dict, supabase: Client):
         
         if save_changes:
             success = update_user_profile(
-                supabase, user['id'], new_email, new_full_name, new_phone,
-                new_location, new_website, new_bio, new_avatar_url, new_role,
+                supabase, user['id'], new_email, new_full_name, new_username,
+                new_website, new_avatar_url, new_role, new_subscription_tier,
                 new_active, new_verified
             )
             if success:
@@ -547,17 +633,21 @@ def render_user_editor(user: Dict, supabase: Client):
                     st.error("❌ Failed to delete user")
 
 def update_user_profile(supabase: Client, user_id: str, email: str, full_name: str, 
-                       phone: str, location: str, website: str, bio: str, avatar_url: str,
-                       role: str, is_active: bool, email_verified: bool) -> bool:
+                       username: str, website: str, avatar_url: str, role: str,
+                       subscription_tier: str, is_active: bool, email_verified: bool) -> bool:
     """Update user profile and settings"""
     try:
         # Update auth user email if changed
-        current_user = supabase.auth.admin.get_user_by_id(user_id)
-        if current_user.user.email != email:
+        current_user_response = supabase.auth.admin.get_user_by_id(user_id)
+        current_user = current_user_response.user if hasattr(current_user_response, 'user') else current_user_response
+        
+        current_email = getattr(current_user, 'email', '')
+        if current_email != email:
             supabase.auth.admin.update_user_by_id(user_id, {"email": email})
         
         # Update email verification status
-        if email_verified and not current_user.user.email_confirmed_at:
+        current_email_confirmed = getattr(current_user, 'email_confirmed_at', None)
+        if email_verified and not current_email_confirmed:
             supabase.auth.admin.update_user_by_id(user_id, {"email_confirm": True})
         
         # Update user active status
@@ -566,23 +656,39 @@ def update_user_profile(supabase: Client, user_id: str, email: str, full_name: s
         else:
             supabase.auth.admin.update_user_by_id(user_id, {"ban_duration": "none"})
         
-        # Update profile
+        # Update profiles table
         supabase.table("profiles").upsert({
             "id": user_id,
             "full_name": full_name,
-            "phone": phone,
-            "location": location,
+            "username": username,
             "website": website,
-            "bio": bio,
             "avatar_url": avatar_url,
             "role": role,
             "updated_at": datetime.now().isoformat()
         }).execute()
         
-        # Update user roles
+        # Update user_roles table
         supabase.table("user_roles").upsert({
             "user_id": user_id,
             "role": role
+        }).execute()
+        
+        # Update users table
+        supabase.table("users").upsert({
+            "id": user_id,
+            "email": email,
+            "subscription_tier": subscription_tier,
+            "is_active": is_active,
+            "updated_at": datetime.now().isoformat()
+        }).execute()
+        
+        # Update user_profiles table
+        supabase.table("user_profiles").upsert({
+            "user_id": user_id,
+            "email": email,
+            "full_name": full_name,
+            "role": role,
+            "status": "approved" if is_active else "suspended"
         }).execute()
         
         return True
@@ -612,17 +718,21 @@ def reset_user_password(supabase: Client, user_id: str, new_password: str) -> bo
 def delete_user_account(supabase: Client, user_id: str) -> bool:
     """Delete user account and related data"""
     try:
-        # Delete from profiles
-        supabase.table("profiles").delete().eq("id", user_id).execute()
+        # Delete from all related tables
+        tables_to_clean = [
+            "profiles", "user_roles", "user_profiles", "users",
+            "user_preferences", "user_activity_logs", "user_sessions",
+            "api_usage", "chat_threads", "file_uploads", "custom_assistants"
+        ]
         
-        # Delete from user_roles
-        supabase.table("user_roles").delete().eq("user_id", user_id).execute()
-        
-        # Delete from user_approvals
-        try:
-            supabase.table("user_approvals").delete().eq("user_id", user_id).execute()
-        except:
-            pass
+        for table in tables_to_clean:
+            try:
+                if table == "users":
+                    supabase.table(table).delete().eq("id", user_id).execute()
+                else:
+                    supabase.table(table).delete().eq("user_id", user_id).execute()
+            except:
+                continue  # Some tables might not exist or have different structures
         
         # Delete auth user
         supabase.auth.admin.delete_user(user_id)
@@ -632,15 +742,45 @@ def delete_user_account(supabase: Client, user_id: str) -> bool:
         st.error(f"Error deleting user: {str(e)}")
         return False
 
-def approve_user_request(user_id: str, approval_type: str):
+def approve_user_request(user_id: str, email: str):
     """Approve a pending user request"""
-    # Implementation would depend on your approval system
-    st.success(f"✅ Approved {approval_type} request for user")
+    try:
+        supabase = init_service_client()
+        
+        # Update pending_signups table
+        supabase.table("pending_signups").update({
+            "status": "approved",
+            "updated_at": datetime.now().isoformat()
+        }).eq("email", email).execute()
+        
+        # Update user_profiles table
+        supabase.table("user_profiles").update({
+            "status": "approved"
+        }).eq("user_id", user_id).execute()
+        
+        st.success(f"✅ Approved user request for {email}")
+    except Exception as e:
+        st.error(f"Error approving user: {str(e)}")
 
-def reject_user_request(user_id: str, approval_type: str):
+def reject_user_request(user_id: str, email: str):
     """Reject a pending user request"""
-    # Implementation would depend on your approval system
-    st.success(f"❌ Rejected {approval_type} request for user")
+    try:
+        supabase = init_service_client()
+        
+        # Update pending_signups table
+        supabase.table("pending_signups").update({
+            "status": "rejected",
+            "updated_at": datetime.now().isoformat()
+        }).eq("email", email).execute()
+        
+        # Update user_profiles table
+        supabase.table("user_profiles").update({
+            "status": "rejected"
+        }).eq("user_id", user_id).execute()
+        
+        st.success(f"❌ Rejected user request for {email}")
+    except Exception as e:
+        st.error(f"Error rejecting user: {str(e)}")
 
 def create_admin_user(supabase: Client, email: str, password: str, full_name: str = "") -> Tuple[bool, str]:
     """Create a new admin user"""
@@ -654,15 +794,34 @@ def create_admin_user(supabase: Client, email: str, password: str, full_name: st
         if user_response.user:
             user_id = user_response.user.id
             
+            # Create profile
             supabase.table("profiles").insert({
                 "id": user_id,
                 "full_name": full_name,
                 "role": "admin"
             }).execute()
             
+            # Create user role entry
             supabase.table("user_roles").insert({
                 "user_id": user_id,
                 "role": "admin"
+            }).execute()
+            
+            # Create user profile entry
+            supabase.table("user_profiles").insert({
+                "user_id": user_id,
+                "email": email,
+                "full_name": full_name,
+                "role": "admin",
+                "status": "approved"
+            }).execute()
+            
+            # Create users table entry
+            supabase.table("users").insert({
+                "id": user_id,
+                "email": email,
+                "subscription_tier": "enterprise",
+                "is_active": True
             }).execute()
             
             return True, f"Admin user created successfully: {email}"
@@ -683,12 +842,18 @@ def promote_user_to_admin(supabase: Client, email: str) -> Tuple[bool, str]:
         
         user_id = user['id']
         
+        # Update all relevant tables
         supabase.table("profiles").upsert({
             "id": user_id,
             "role": "admin"
         }).execute()
         
         supabase.table("user_roles").upsert({
+            "user_id": user_id,
+            "role": "admin"
+        }).execute()
+        
+        supabase.table("user_profiles").upsert({
             "user_id": user_id,
             "role": "admin"
         }).execute()
@@ -707,9 +872,11 @@ def bulk_user_operations(supabase: Client, user_ids: List[str], operation: str) 
         elif operation == "activate":
             for user_id in user_ids:
                 supabase.auth.admin.update_user_by_id(user_id, {"ban_duration": "none"})
+                supabase.table("users").update({"is_active": True}).eq("id", user_id).execute()
         elif operation == "deactivate":
             for user_id in user_ids:
                 supabase.auth.admin.update_user_by_id(user_id, {"ban_duration": "876000h"})
+                supabase.table("users").update({"is_active": False}).eq("id", user_id).execute()
         elif operation == "verify_email":
             for user_id in user_ids:
                 supabase.auth.admin.update_user_by_id(user_id, {"email_confirm": True})
@@ -727,17 +894,19 @@ def export_users_data(users: List[Dict]) -> pd.DataFrame:
             'ID': user['id'],
             'Email': user['email'],
             'Full Name': user['full_name'],
+            'Username': user['username'],
             'Role': user['role'],
+            'Subscription Tier': user['subscription_tier'],
             'Active': user['is_active'],
             'Email Verified': bool(user['email_confirmed_at']),
-            'Phone': user['phone'],
-            'Location': user['location'],
             'Website': user['website'],
-            'Bio': user['bio'],
             'Created At': user['created_at'],
             'Last Sign In': user['last_sign_in_at'],
             'Activity Score': user['activity_score'],
-            'Pending Approval': user['pending_approval']
+            'Pending Approval': user['pending_approval'],
+            'Approval Status': user['approval_status'],
+            'Tokens Used': user['tokens_used'],
+            'Total Cost': user['total_cost']
         })
     
     return pd.DataFrame(export_data)
@@ -805,7 +974,7 @@ def main():
         with col2:
             status_filter = st.selectbox("Filter by Status", ["All", "Active", "Inactive"])
         with col3:
-            verified_filter = st.selectbox("Email Status", ["All", "Verified", "Unverified"])
+            tier_filter = st.selectbox("Subscription Tier", ["All", "free", "pro", "enterprise"])
         with col4:
             search_term = st.text_input("🔍 Search users...")
         
@@ -819,14 +988,14 @@ def main():
             is_active = status_filter == "Active"
             filtered_users = [u for u in filtered_users if u['is_active'] == is_active]
         
-        if verified_filter != "All":
-            is_verified = verified_filter == "Verified"
-            filtered_users = [u for u in filtered_users if bool(u['email_confirmed_at']) == is_verified]
+        if tier_filter != "All":
+            filtered_users = [u for u in filtered_users if u['subscription_tier'] == tier_filter]
         
         if search_term:
             filtered_users = [u for u in filtered_users 
                             if search_term.lower() in u['email'].lower() 
-                            or search_term.lower() in u.get('full_name', '').lower()]
+                            or search_term.lower() in u.get('full_name', '').lower()
+                            or search_term.lower() in u.get('username', '').lower()]
         
         st.markdown(f"**Showing {len(filtered_users)} of {len(users)} users**")
         
@@ -898,8 +1067,9 @@ def main():
                 col1, col2 = st.columns([4, 1])
                 
                 with col1:
-                    st.markdown(f"**{user['full_name'] or 'No Name'}** ({user['email']})")
-                    st.markdown(f"Role: {user['role']} | Active: {'Yes' if user['is_active'] else 'No'}")
+                    display_name = user['full_name'] or user['username'] or 'No Name'
+                    st.markdown(f"**{display_name}** ({user['email']})")
+                    st.markdown(f"Role: {user['role']} | Tier: {user['subscription_tier']} | Active: {'Yes' if user['is_active'] else 'No'}")
                 
                 with col2:
                     if st.button("⬆️ Promote", key=f"promote_{user['id']}"):
@@ -929,7 +1099,8 @@ def main():
                 if select_all:
                     selected = True
                 else:
-                    selected = st.checkbox(f"{user['email']} ({user['full_name'] or 'No Name'})", key=f"bulk_{user['id']}")
+                    display_name = user['full_name'] or user['username'] or 'No Name'
+                    selected = st.checkbox(f"{user['email']} ({display_name})", key=f"bulk_{user['id']}")
                 
                 if selected:
                     selected_users.append(user['id'])
@@ -994,7 +1165,6 @@ def main():
                     mime="text/csv"
                 )
             else:
-                # For Excel, we'd need to create the file first
                 st.info("Excel export functionality would be implemented here")
         else:
             st.info("No user data to export")
@@ -1009,7 +1179,7 @@ def main():
             with col1:
                 email_search = st.text_input("Email contains")
                 name_search = st.text_input("Name contains")
-                location_search = st.text_input("Location contains")
+                username_search = st.text_input("Username contains")
             
             with col2:
                 date_from = st.date_input("Registered after")
@@ -1018,8 +1188,8 @@ def main():
             
             with col3:
                 role_search = st.multiselect("Roles", ["admin", "user", "moderator"])
-                has_phone = st.checkbox("Has phone number")
-                has_avatar = st.checkbox("Has avatar")
+                tier_search = st.multiselect("Subscription Tiers", ["free", "pro", "enterprise"])
+                has_website = st.checkbox("Has website")
         
         # Apply advanced filters
         filtered_users = users
@@ -1030,17 +1200,17 @@ def main():
         if name_search:
             filtered_users = [u for u in filtered_users if name_search.lower() in u.get('full_name', '').lower()]
         
-        if location_search:
-            filtered_users = [u for u in filtered_users if location_search.lower() in u.get('location', '').lower()]
+        if username_search:
+            filtered_users = [u for u in filtered_users if username_search.lower() in u.get('username', '').lower()]
         
         if role_search:
             filtered_users = [u for u in filtered_users if u['role'] in role_search]
         
-        if has_phone:
-            filtered_users = [u for u in filtered_users if u.get('phone')]
+        if tier_search:
+            filtered_users = [u for u in filtered_users if u['subscription_tier'] in tier_search]
         
-        if has_avatar:
-            filtered_users = [u for u in filtered_users if u.get('avatar_url')]
+        if has_website:
+            filtered_users = [u for u in filtered_users if u.get('website')]
         
         # Activity filter
         if activity_filter != "All":
