@@ -7,6 +7,87 @@ import plotly.graph_objects as go
 from datetime import datetime, timedelta
 
 # -------------------------
+# Hide Streamlit Settings & Styling
+# -------------------------
+hide_streamlit_style = """
+    <style>
+    /* Hide Streamlit header, footer, and menu */
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    header {visibility: hidden;}
+    
+    /* Hide the hamburger menu */
+    .css-14xtw13.e8zbici0 {display: none;}
+    
+    /* Hide the "Deploy" button */
+    .css-1rs6os.edgvbvh3 {display: none;}
+    
+    /* Hide the settings menu */
+    .css-vk3wp9.e1akgbir0 {display: none;}
+    
+    /* Hide the GitHub icon */
+    .css-1j8o68f.edgvbvh9 {display: none;}
+    
+    /* Custom styling for better appearance */
+    .stApp > header {
+        background-color: transparent;
+    }
+    
+    .stApp {
+        margin-top: -80px;
+    }
+    
+    /* Hide sidebar initially */
+    .css-1d391kg {
+        display: none;
+    }
+    
+    /* Show sidebar only when authenticated */
+    .show-sidebar .css-1d391kg {
+        display: flex !important;
+    }
+    </style>
+"""
+
+def hide_sidebar():
+    """Hide the sidebar completely"""
+    st.markdown("""
+    <style>
+        .css-1d391kg {
+            display: none;
+        }
+        section[data-testid="stSidebar"] {
+            display: none;
+        }
+        .css-6qob1r {
+            display: none;
+        }
+        .e1fqkh3o3 {
+            display: none;
+        }
+    </style>
+    """, unsafe_allow_html=True)
+
+def show_sidebar():
+    """Show the sidebar for authenticated users"""
+    st.markdown("""
+    <style>
+        .css-1d391kg {
+            display: flex !important;
+        }
+        section[data-testid="stSidebar"] {
+            display: flex !important;
+        }
+        .css-6qob1r {
+            display: flex !important;
+        }
+        .e1fqkh3o3 {
+            display: flex !important;
+        }
+    </style>
+    """, unsafe_allow_html=True)
+
+# -------------------------
 # Supabase Setup
 # -------------------------
 def init_connection() -> Client:
@@ -102,11 +183,25 @@ def logout():
 # Admin Dashboard
 # -------------------------
 def admin_dashboard():
+    # Show sidebar for authenticated users
+    show_sidebar()
+    
     st.title("👑 Admin Dashboard")
     
     # Sidebar navigation for admin features
     with st.sidebar:
         st.header("🔧 Admin Tools")
+        
+        # User info in sidebar
+        if st.session_state.user:
+            st.info(f"👤 {st.session_state.user.email}\n🎭 {st.session_state.role.title()}")
+        
+        # Logout button in sidebar
+        if st.button("🚪 Logout", type="secondary", use_container_width=True):
+            logout()
+        
+        st.divider()
+        
         admin_section = st.selectbox(
             "Select Section",
             ["📊 Analytics Overview", "👥 User Management", "📈 System Reports", "⚙️ Settings"]
@@ -314,33 +409,41 @@ def show_admin_settings():
 # User Dashboard
 # -------------------------
 def user_dashboard():
+    # Show sidebar for authenticated users
+    show_sidebar()
+    
     st.title("🙋 Welcome to Your Dashboard")
     
     user_email = st.session_state.user.email if st.session_state.user else "Unknown"
     user_id = st.session_state.user.id if st.session_state.user else None
     
-    # Welcome section
-    col1, col2 = st.columns([3, 1])
-    with col1:
-        st.markdown(f"### Hello, **{user_email.split('@')[0].title()}**! 👋")
-        st.info(f"🎭 Role: {st.session_state.role.title()} | 📧 Email: {user_email}")
-    with col2:
-        if st.button("🚪 Logout", type="primary"):
+    # Sidebar for user navigation
+    with st.sidebar:
+        st.header("🏠 Dashboard")
+        
+        # User info in sidebar
+        st.info(f"👤 {user_email.split('@')[0].title()}\n🎭 {st.session_state.role.title()}\n📧 {user_email}")
+        
+        # Logout button in sidebar
+        if st.button("🚪 Logout", type="secondary", use_container_width=True):
             logout()
+        
+        st.divider()
+        
+        # Navigation menu
+        page = st.selectbox(
+            "Navigate to:",
+            ["📊 My Activity", "👤 Profile", "🔔 Notifications", "❓ Help"]
+        )
     
-    # User-specific content tabs
-    tab1, tab2, tab3, tab4 = st.tabs(["📊 My Activity", "👤 Profile", "🔔 Notifications", "❓ Help"])
-    
-    with tab1:
+    # Main content based on sidebar selection
+    if page == "📊 My Activity":
         show_user_activity(user_id, user_email)
-    
-    with tab2:
+    elif page == "👤 Profile":
         show_user_profile(user_id, user_email)
-    
-    with tab3:
+    elif page == "🔔 Notifications":
         show_user_notifications(user_email)
-    
-    with tab4:
+    elif page == "❓ Help":
         show_user_help()
 
 def show_user_activity(user_id, user_email):
@@ -479,40 +582,109 @@ def redirect_dashboard():
         user_dashboard()
 
 # -------------------------
+# Login Page
+# -------------------------
+def login_page():
+    # Hide sidebar completely for unauthenticated users
+    hide_sidebar()
+    
+    st.title("🔐 Secure Authentication Portal")
+    
+    # Add some styling for the login page
+    st.markdown("""
+    <div style='text-align: center; padding: 20px; margin-bottom: 30px; background: linear-gradient(90deg, #667eea 0%, #764ba2 100%); border-radius: 10px; color: white;'>
+        <h3>🚀 Welcome to Your Secure Dashboard</h3>
+        <p>Please authenticate to access your personalized experience</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    tab1, tab2, tab3 = st.tabs(["🔑 Login", "📝 Sign Up", "🔄 Reset Password"])
+
+    with tab1:
+        st.subheader("🔑 Sign In to Your Account")
+        with st.form("login_form"):
+            email = st.text_input("📧 Email Address", placeholder="your.email@example.com")
+            password = st.text_input("🔒 Password", type="password", placeholder="Enter your password")
+            
+            col1, col2 = st.columns([1, 1])
+            with col1:
+                remember_me = st.checkbox("🧠 Remember me")
+            with col2:
+                st.write("")  # Spacer
+            
+            if st.form_submit_button("🚀 Login", type="primary", use_container_width=True):
+                if email and password:
+                    success, msg = login(email, password)
+                    if success:
+                        st.success(msg)
+                        st.balloons()
+                        st.rerun()
+                    else:
+                        st.error(msg)
+                else:
+                    st.warning("Please fill in all fields.")
+
+    with tab2:
+        st.subheader("📝 Create New Account")
+        with st.form("signup_form"):
+            email = st.text_input("📧 Email Address", placeholder="your.email@example.com")
+            password = st.text_input("🔒 Password", type="password", 
+                                   help="Must be 12+ characters with uppercase, lowercase, number, and special character")
+            confirm_password = st.text_input("🔒 Confirm Password", type="password")
+            role = st.selectbox("👤 Account Type", ["user", "admin"], 
+                               help="Select 'admin' only if you have administrative privileges")
+            
+            terms = st.checkbox("✅ I agree to the Terms of Service and Privacy Policy")
+            
+            if st.form_submit_button("🎉 Create Account", type="primary", use_container_width=True):
+                if email and password and confirm_password:
+                    if password != confirm_password:
+                        st.error("❌ Passwords don't match!")
+                    elif not terms:
+                        st.warning("⚠️ Please agree to the terms and conditions.")
+                    else:
+                        success, msg = signup(email, password, role)
+                        if success:
+                            st.success(msg)
+                            st.balloons()
+                        else:
+                            st.error(msg)
+                else:
+                    st.warning("Please fill in all fields.")
+
+    with tab3:
+        st.subheader("🔄 Reset Your Password")
+        with st.form("reset_form"):
+            email = st.text_input("📧 Email Address", 
+                                 placeholder="Enter your registered email address")
+            st.info("💡 We'll send you a secure link to reset your password")
+            
+            if st.form_submit_button("📧 Send Reset Link", type="primary", use_container_width=True):
+                if email:
+                    success, msg = reset_password(email)
+                    if success:
+                        st.success(msg)
+                    else:
+                        st.error(msg)
+                else:
+                    st.warning("Please enter your email address.")
+
+# -------------------------
 # Main App
 # -------------------------
 def main():
-    st.set_page_config(page_title="Enhanced Auth App", page_icon="🔐", layout="wide")
+    st.set_page_config(
+        page_title="Secure Auth Portal", 
+        page_icon="🔐", 
+        layout="wide",
+        initial_sidebar_state="collapsed"  # Start with collapsed sidebar
+    )
+    
+    # Apply custom CSS to hide Streamlit elements
+    st.markdown(hide_streamlit_style, unsafe_allow_html=True)
 
     if not st.session_state.authenticated:
-        st.title("🔐 Supabase Authentication")
-
-        tab1, tab2, tab3 = st.tabs(["🔑 Login", "📝 Sign Up", "🔄 Reset Password"])
-
-        with tab1:
-            with st.form("login_form"):
-                email = st.text_input("📧 Email")
-                password = st.text_input("🔒 Password", type="password")
-                if st.form_submit_button("Login", type="primary"):
-                    success, msg = login(email, password)
-                    st.success(msg) if success else st.error(msg)
-                    if success: st.rerun()
-
-        with tab2:
-            with st.form("signup_form"):
-                email = st.text_input("📧 Email")
-                password = st.text_input("🔒 Password", type="password")
-                role = st.selectbox("👤 Role", ["user", "admin"])
-                if st.form_submit_button("Sign Up", type="primary"):
-                    success, msg = signup(email, password, role)
-                    st.success(msg) if success else st.error(msg)
-
-        with tab3:
-            with st.form("reset_form"):
-                email = st.text_input("📧 Email")
-                if st.form_submit_button("Send Reset", type="primary"):
-                    success, msg = reset_password(email)
-                    st.success(msg) if success else st.error(msg)
+        login_page()
     else:
         redirect_dashboard()
 
@@ -521,4 +693,3 @@ def main():
 # -------------------------
 if __name__ == "__main__":
     main()
-
